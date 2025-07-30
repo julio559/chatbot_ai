@@ -29,9 +29,9 @@ class Webhook extends ResourceController
 
         // Atualiza ou cria paciente
         $pacienteModel = new PacienteModel();
-        $pacienteExistente = $pacienteModel->where('telefone', $numero)->first();
-        if ($pacienteExistente) {
-            $pacienteModel->update($pacienteExistente['id'], ['ultimo_contato' => date('Y-m-d H:i:s')]);
+        $paciente = $pacienteModel->where('telefone', $numero)->first();
+        if ($paciente) {
+            $pacienteModel->update($paciente['id'], ['ultimo_contato' => date('Y-m-d H:i:s')]);
         } else {
             $pacienteModel->insert(['nome' => $nome, 'telefone' => $numero]);
         }
@@ -43,14 +43,11 @@ class Webhook extends ResourceController
         $novaEtapa = $etapaAtual;
         $resposta = '';
 
-        // Busca Configuração da IA (ID fixo = 1 por enquanto)
+        // Configuração
         $configModel = new ConfigIaModel();
-        $config = $configModel->where('assinante_id', 1)->first();
-
-        // Valores padrão
-        $config = $config ?? [
+        $config = $configModel->where('assinante_id', 1)->first() ?? [
             'tempo_resposta' => 5,
-            'prompt_base' => "Você é a assistente humana da Dra. Bruna Sathler. Responda como se estivesse no WhatsApp, com gentileza e naturalidade. Use frases curtas, como um humano faria. Se a pessoa disser 'oi', 'olá', ou 'tudo bem?', apenas cumprimente de volta e pergunte se pode ajudar. Nunca mencione equipe, atendimento, procedimentos ou agendamento, a menos que a pessoa peça algo relacionado. Seja objetiva e educada, sem parecer robô. Não repita informações nem antecipe assuntos.",
+            'prompt_base' => "Você é a assistente humana da Dra. Bruna Sathler. Responda como se estivesse no WhatsApp, com gentileza e naturalidade. Use frases curtas, como um humano faria...",
             'modo_formal' => false,
             'permite_respostas_longas' => false,
             'permite_redirecionamento' => false
@@ -61,13 +58,13 @@ class Webhook extends ResourceController
             return $this->respond(['status' => 'aguardando equipe'], 200);
         }
 
-        // Lógica de detecção de intenção
+        // Palavras-chave
         $palavrasAgendamento = ['agendar', 'consulta', 'marcar', 'horário'];
         $palavrasOrcamento = ['valor', 'preço', 'custo', 'quanto', 'orcamento'];
 
         foreach ($palavrasAgendamento as $p) {
             if (strpos($mensagem, $p) !== false) {
-                $resposta = "Certo! Já estou chamando alguém da equipe para agendar com você.";
+                $resposta = "Certo! Me dá somente um minutinho.";
                 $novaEtapa = 'agendamento';
                 break;
             }
@@ -76,32 +73,47 @@ class Webhook extends ResourceController
         if ($novaEtapa === $etapaAtual) {
             foreach ($palavrasOrcamento as $p) {
                 if (strpos($mensagem, $p) !== false) {
-                    $resposta = "Certo! Já estou chamando alguém da equipe para te passar o orçamento.";
+                    $resposta = "Certo! Me dá somente um minutinho.";
                     $novaEtapa = 'orcamento';
                     break;
                 }
             }
         }
 
-        // Resposta via IA se nenhuma palavra-chave foi detectada
+        // IA: continuar conversa se nenhuma palavra-chave
         if ($novaEtapa === $etapaAtual) {
-            if (in_array($etapaAtual, ['fim'])) {
+            if ($etapaAtual === 'fim') {
                 return $this->respond(['ignorado' => 'sessao finalizada'], 200);
             }
 
             $openai = new OpenrouterModel();
             $mensagens = [
                 ['role' => 'system', 'content' => $config['prompt_base']],
-                ['role' => 'user', 'content' => $mensagem]
             ];
+
+            if (!empty($sessao['ultima_mensagem_usuario'])) {
+                $mensagens[] = ['role' => 'user', 'content' => $sessao['ultima_mensagem_usuario']];
+            }
+            if (!empty($sessao['ultima_resposta_ia'])) {
+                $mensagens[] = ['role' => 'assistant', 'content' => $sessao['ultima_resposta_ia']];
+            }
+
+            // Mensagem atual
+            $mensagens[] = ['role' => 'user', 'content' => $mensagem];
 
             sleep((int) $config['tempo_resposta']);
             $resposta = $openai->enviarMensagem($mensagens);
         }
 
-        $sessaoModel->atualizarEtapa($numero, $novaEtapa);
-        $this->enviarParaWhatsapp($numero, $resposta);
+        // Atualizar sessão
+        $sessaoModel->where('numero', $numero)->set([
+            'etapa' => $novaEtapa,
+            'ultima_mensagem_usuario' => $mensagem,
+            'ultima_resposta_ia' => $resposta
+        ])->update();
 
+        // Envia
+        $this->enviarParaWhatsapp($numero, $resposta);
         return $this->respond(['status' => 'mensagem enviada']);
     }
 
@@ -127,4 +139,5 @@ class Webhook extends ResourceController
         curl_exec($ch);
         curl_close($ch);
     }
+    
 }
