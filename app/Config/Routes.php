@@ -13,4 +13,5 @@ $routes->post('paciente/atualizar/(:num)', 'Paciente::atualizar/$1');
 $routes->get('configuracaoia', 'ConfiguracaoIA::index');
 $routes->post('configuracaoia/salvar', 'ConfiguracaoIA::salvar');
 $routes->post('configuracaoia/testar', 'ConfiguracaoIA::testar');
+$routes->get('painel/aguardando', 'Painel::aguardando');
 
