@@ -2,24 +2,19 @@
 
 namespace App\Controllers;
 
-use App\Models\SessaoModel;
-use App\Models\OpenrouterModel;
-use App\Models\PacienteModel;
-use App\Models\ConfigIaModel;
+use App\Models\{SessaoModel, OpenrouterModel, PacienteModel, ConfigIaModel};
 use CodeIgniter\RESTful\ResourceController;
 
 class Webhook extends ResourceController
 {
     public function index()
     {
+        helper('ia');
+
         $json = $this->request->getJSON(true);
 
-        if (
-            !isset($json['data']['from']) ||
-            !isset($json['data']['body']) ||
-            $json['data']['fromMe'] === true
-        ) {
-            return $this->respond(['ignorado' => true], 200);
+        if (!isset($json['data']['from']) || !isset($json['data']['body']) || $json['data']['fromMe'] === true) {
+            return $this->respond(['ignorado' => 'mensagem do atendente ou inválida'], 200);
         }
 
         $numeroRaw = $json['data']['from'];
@@ -27,13 +22,13 @@ class Webhook extends ResourceController
         $nome = $json['data']['pushname'] ?? 'Paciente';
         $mensagem = strtolower(trim($json['data']['body']));
 
-        // Atualiza ou cria paciente
+        // Atualizar ou inserir paciente
         $pacienteModel = new PacienteModel();
         $paciente = $pacienteModel->where('telefone', $numero)->first();
         if ($paciente) {
             $pacienteModel->update($paciente['id'], ['ultimo_contato' => date('Y-m-d H:i:s')]);
         } else {
-            $pacienteModel->insert(['nome' => $nome, 'telefone' => $numero]);
+            $pacienteModel->insert(['nome' => $nome, 'telefone' => $numero, 'ultimo_contato' => date('Y-m-d H:i:s')]);
         }
 
         // Sessão
@@ -43,77 +38,87 @@ class Webhook extends ResourceController
         $novaEtapa = $etapaAtual;
         $resposta = '';
 
-        // Configuração
+        // 🔒 Bloqueia resposta da IA se estiver em etapas específicas
+        $etapasBloqueadas = ['agendamento', 'finalizado'];
+        if (in_array($etapaAtual, $etapasBloqueadas)) {
+            return $this->respond(['ignorado' => "IA não responde em etapa '$etapaAtual'"], 200);
+        }
+
+        // 🔍 Etapas válidas do banco
         $configModel = new ConfigIaModel();
-        $config = $configModel->where('assinante_id', 1)->first() ?? [
-            'tempo_resposta' => 5,
-            'prompt_base' => "Você é a assistente humana da Dra. Bruna Sathler. Responda como se estivesse no WhatsApp, com gentileza e naturalidade. Use frases curtas, como um humano faria...",
-            'modo_formal' => false,
-            'permite_respostas_longas' => false,
-            'permite_redirecionamento' => false
+        $etapasValidas = array_column(
+            $configModel->where('assinante_id', 1)->findAll(),
+            'etapa_atual'
+        );
+
+        // 🔍 Detectar intenção e atualizar etapa se necessário
+        $palavrasChave = [
+            'agendamento' => ['agendar', 'consulta', 'marcar', 'horário', 'atendimento'],
+            'financeiro' => ['valor', 'preço', 'custo', 'quanto', 'pix'],
+            'perdido' => ['desistir', 'não quero', 'não tenho interesse', 'não posso'],
+            'em_contato' => ['me explica', 'quero saber mais', 'entendi', 'ok', 'vamos conversar'],
         ];
 
-        // Se já está em agendamento ou orçamento, não responde
-        if (in_array($etapaAtual, ['agendamento', 'orcamento'])) {
-            return $this->respond(['status' => 'aguardando equipe'], 200);
-        }
-
-        // Palavras-chave
-        $palavrasAgendamento = ['agendar', 'consulta', 'marcar', 'horário'];
-        $palavrasOrcamento = ['valor', 'preço', 'custo', 'quanto', 'orcamento'];
-
-        foreach ($palavrasAgendamento as $p) {
-            if (strpos($mensagem, $p) !== false) {
-                $resposta = "Certo! Me dá somente um minutinho.";
-                $novaEtapa = 'agendamento';
-                break;
-            }
-        }
-
-        if ($novaEtapa === $etapaAtual) {
-            foreach ($palavrasOrcamento as $p) {
-                if (strpos($mensagem, $p) !== false) {
-                    $resposta = "Certo! Me dá somente um minutinho.";
-                    $novaEtapa = 'orcamento';
-                    break;
+        foreach ($palavrasChave as $etapa => $palavras) {
+            foreach ($palavras as $p) {
+                if (strpos($mensagem, $p) !== false && in_array($etapa, $etapasValidas)) {
+                    $novaEtapa = $etapa;
+                    $resposta = "Certo! Me dá só um minutinho aqui...";
+                    break 2;
                 }
             }
         }
 
-        // IA: continuar conversa se nenhuma palavra-chave
-        if ($novaEtapa === $etapaAtual) {
-            if ($etapaAtual === 'fim') {
-                return $this->respond(['ignorado' => 'sessao finalizada'], 200);
+        // 🔁 Histórico
+        $historicoSessao = session()->get("historico_{$numero}") ?? [];
+        $historicoBanco = json_decode($sessao['historico'] ?? '[]', true);
+        $historico = (!empty($historicoSessao)) ? $historicoSessao : $historicoBanco;
+
+        // 🔔 Revisita
+        $mensagemRevisita = '';
+        if (!empty($historico) && isset($paciente['ultimo_contato'])) {
+            $tempoUltimoContato = strtotime($paciente['ultimo_contato']);
+            if ($tempoUltimoContato && (time() - $tempoUltimoContato > 604800)) {
+                $mensagemRevisita = "Que bom te ver por aqui de novo! 😊";
             }
-
-            $openai = new OpenrouterModel();
-            $mensagens = [
-                ['role' => 'system', 'content' => $config['prompt_base']],
-            ];
-
-            if (!empty($sessao['ultima_mensagem_usuario'])) {
-                $mensagens[] = ['role' => 'user', 'content' => $sessao['ultima_mensagem_usuario']];
-            }
-            if (!empty($sessao['ultima_resposta_ia'])) {
-                $mensagens[] = ['role' => 'assistant', 'content' => $sessao['ultima_resposta_ia']];
-            }
-
-            // Mensagem atual
-            $mensagens[] = ['role' => 'user', 'content' => $mensagem];
-
-            sleep((int) $config['tempo_resposta']);
-            $resposta = $openai->enviarMensagem($mensagens);
         }
 
-        // Atualizar sessão
+        // 🧠 Prompt da IA com base na etapa atual
+        $promptEtapa = $configModel
+            ->where('assinante_id', 1)
+            ->where('etapa_atual', $etapaAtual)
+            ->first();
+
+        $promptBase = $promptEtapa['prompt_base'] ?? null;
+        $prompt = $promptBase ?: get_prompt_padrao();
+        $tempoResposta = $promptEtapa['tempo_resposta'] ?? 5;
+
+        // 💬 Envia mensagem para IA
+        $mensagens = [['role' => 'system', 'content' => $prompt]];
+        foreach ($historico as $msg) $mensagens[] = $msg;
+        $mensagens[] = ['role' => 'user', 'content' => $mensagem];
+
+        sleep((int)$tempoResposta);
+        $respostaGerada = (new OpenrouterModel())->enviarMensagem($mensagens);
+
+        if ($mensagemRevisita) {
+            $respostaGerada = $mensagemRevisita . "\n" . $respostaGerada;
+        }
+
+        // 📝 Atualiza tudo
+        $historico[] = ['role' => 'user', 'content' => $mensagem];
+        $historico[] = ['role' => 'assistant', 'content' => $respostaGerada];
+
+        session()->set("historico_{$numero}", $historico);
+
         $sessaoModel->where('numero', $numero)->set([
             'etapa' => $novaEtapa,
             'ultima_mensagem_usuario' => $mensagem,
-            'ultima_resposta_ia' => $resposta
+            'ultima_resposta_ia' => $respostaGerada,
+            'historico' => json_encode($historico)
         ])->update();
 
-        // Envia
-        $this->enviarParaWhatsapp($numero, $resposta);
+        $this->enviarParaWhatsapp($numero, $respostaGerada);
         return $this->respond(['status' => 'mensagem enviada']);
     }
 
@@ -139,5 +144,4 @@ class Webhook extends ResourceController
         curl_exec($ch);
         curl_close($ch);
     }
-    
 }

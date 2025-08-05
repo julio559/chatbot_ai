@@ -1,9 +1,9 @@
 <?php
-
 namespace App\Controllers;
 
 use App\Models\PacienteModel;
 use App\Models\SessaoModel;
+use App\Models\ConfigIaModel;
 use CodeIgniter\Controller;
 
 class Paciente extends Controller
@@ -17,7 +17,21 @@ class Paciente extends Controller
         $builder->join('sessoes', 'sessoes.numero = pacientes.telefone', 'left');
         $builder->orderBy('pacientes.ultimo_contato', 'DESC');
 
+        // 🔁 Buscar etapas do banco (config_ia)
+        $configIaModel = new ConfigIaModel();
+        $resultados = $configIaModel
+            ->where('assinante_id', 1)
+            ->orderBy('id', 'ASC')
+            ->findAll();
+
+        $etapas = [];
+        foreach ($resultados as $linha) {
+            $etapa = $linha['etapa_atual'];
+            $etapas[$etapa] = ucfirst(str_replace('_', ' ', $etapa));
+        }
+
         $dados['pacientes'] = $builder->get()->getResultArray();
+        $dados['etapas'] = $etapas;
 
         return view('paciente', $dados);
     }
@@ -60,7 +74,7 @@ class Paciente extends Controller
             // Exclui o paciente
             $pacienteModel->delete($id);
 
-            // Opcional: também remove a sessão associada
+            // Também remove a sessão associada
             $sessaoModel = new SessaoModel();
             $sessaoModel->delete($telefone);
         }
