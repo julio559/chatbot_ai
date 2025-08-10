@@ -68,3 +68,25 @@ $routes->post('notificacoes/delete/(:num)', 'Notificacoes::delete/$1');
 $routes->post('notificacoes/regra/save', 'Notificacoes::saveRule');
 $routes->get('notificacoes/regras', 'Notificacoes::rules');      // JSON
 
+$routes->group('configuracaoia', static function ($routes) {
+    $routes->get('/', 'ConfiguracaoIA::index');
+    $routes->post('salvar', 'ConfiguracaoIA::salvar');
+
+    $routes->get('historicoTeste', 'ConfiguracaoIA::historicoTeste');
+    $routes->post('testarchat', 'ConfiguracaoIA::testarchat');
+
+    // limpar histórico (sessão + banco)
+    $routes->post('limparHistoricoTeste', 'ConfiguracaoIA::limparHistoricoTeste');
+
+    // atualizar etapa no topo do chat
+    $routes->post('atualizarEtapaTeste', 'ConfiguracaoIA::atualizarEtapaTeste');
+
+    // <<< alias para links antigos
+    $routes->match(['get','post'], 'testarChatSimulado', 'ConfiguracaoIA::testarChatSimulado');
+});
+
+
+
+
+
+
