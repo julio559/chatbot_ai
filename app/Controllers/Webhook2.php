@@ -122,26 +122,39 @@ class Webhook extends ResourceController
         return $this->respond(['status' => 'mensagem enviada']);
     }
 
-    private function enviarParaWhatsapp($numero, $mensagem)
-    {
-        $instanceId = 'instance136009';
-        $token = 'rbsu6e74buuzsnjj';
-        $url = "https://api.ultramsg.com/{$instanceId}/messages/chat";
+   private function enviarParaWhatsapp($numero, $mensagem)
+{
+    $instanceId = 'instance136009';
+    $token = 'rbsu6e74buuzsnjj';
+    $url = "https://api.ultramsg.com/{$instanceId}/messages/chat";
 
-        $data = [
-            'token' => $token,
-            'to' => $numero,
-            'body' => $mensagem
-        ];
+    $data = [
+        'token' => $token,
+        'to' => $numero,
+        'body' => $mensagem
+    ];
 
-        $headers = ['Content-Type: application/x-www-form-urlencoded'];
+    $headers = ['Content-Type: application/x-www-form-urlencoded'];
 
-        $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
-        curl_exec($ch);
-        curl_close($ch);
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+    
+    $result = curl_exec($ch);
+    $error = curl_error($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    // Log para debugar
+    log_message('error', "Envio para WhatsApp ({$numero}): HTTP $httpCode - $result");
+
+    if ($error) {
+        log_message('error', "Erro cURL: " . $error);
     }
+
+    return $result;
+}
+
 }
