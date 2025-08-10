@@ -8,22 +8,23 @@ use CodeIgniter\Controller;
 
 class Painel extends Controller
 {
-    public function aguardando()
-    {
-        $sessaoModel = new SessaoModel();
-        $pacienteModel = new PacienteModel();
+public function aguardando()
+{
+    $db = \Config\Database::connect();
 
-        // Busca todas as sessões com etapa 'agendamento' ou 'orcamento'
-        $sessoes = $sessaoModel
-            ->whereIn('etapa', ['agendamento', 'orcamento'])
-            ->findAll();
+    $sessoes = $db->table('sessoes s')
+        ->select('s.*, p.nome')
+        ->join('pacientes p', 'p.telefone = s.numero', 'left')
+        ->whereIn('s.etapa', ['agendamento', 'orcamento', 'financeiro'])
+        ->orderBy('s.data_atualizacao', 'DESC')
+        ->get()
+        ->getResultArray();
 
-        // Adiciona o nome do paciente a cada sessão
-        foreach ($sessoes as &$sessao) {
-            $paciente = $pacienteModel->where('telefone', $sessao['numero'])->first();
-            $sessao['nome'] = $paciente['nome'] ?? 'Sem nome';
-        }
-
-        return view('painel_aguardando', ['sessoes' => $sessoes]);
+    foreach ($sessoes as &$sessao) {
+        $sessao['nome'] = $sessao['nome'] ?: 'Sem nome';
     }
+
+    return view('painel_aguardando', ['sessoes' => $sessoes]);
+}
+
 }
