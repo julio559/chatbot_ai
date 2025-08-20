@@ -6,48 +6,65 @@ use CodeIgniter\Controller;
 
 class Agendamentos extends Controller
 {
-    protected int $assinanteId = 1; // ajuste se tiver multi-assinante
+    protected ?int $usuarioId   = null;
+    protected ?int $assinanteId = null;
+
+    public function __construct()
+    {
+        $this->usuarioId   = (int) (session()->get('usuario_id')   ?? 0) ?: null;
+        $this->assinanteId = (int) (session()->get('assinante_id') ?? 0) ?: null;
+    }
 
     public function index()
     {
-        return view('agendamentos'); // carrega a view abaixo
+        // se quiser travar a view quando não logado, descomente:
+        // if (!$this->usuarioId) return redirect()->to('/login');
+        return view('agendamentos');
     }
 
-    // Lista em JSON, com filtro de status e busca por nome/telefone
+    // Lista em JSON, com filtro de status e busca por nome/telefone (escopo do usuário logado)
     public function list()
-{
-    $db     = \Config\Database::connect();
-    $status = trim((string) $this->request->getGet('status'));
-    $q      = trim((string) $this->request->getGet('q'));
+    {
+        if (!$this->usuarioId) {
+            return $this->response->setStatusCode(401)->setJSON(['ok' => false, 'msg' => 'Não autenticado']);
+        }
 
-    $builder = $db->table('mensagens_agendadas ma')
-        ->select('ma.*, s.etapa, p.nome as paciente_nome')
-        ->join('sessoes s', 's.numero = ma.numero', 'left')
-        ->join('pacientes p', 'p.telefone = ma.numero', 'left')
-        // pendentes primeiro, depois enviados, depois cancelados:
-        ->orderBy("FIELD(ma.status, 'pendente','enviado','cancelado')", '', false)
-        ->orderBy('ma.enviar_em', 'ASC');
+        $db     = \Config\Database::connect();
+        $status = trim((string) $this->request->getGet('status'));
+        $q      = trim((string) $this->request->getGet('q'));
 
-    if ($status !== '' && in_array($status, ['pendente','enviado','cancelado'], true)) {
-        $builder->where('ma.status', $status);
+        $builder = $db->table('mensagens_agendadas ma')
+            ->select('ma.*, s.etapa, p.nome as paciente_nome')
+            ->join('sessoes s', 's.numero = ma.numero', 'left')
+            ->join('pacientes p', 'p.telefone = ma.numero', 'left')
+            ->where('ma.usuario_id', $this->usuarioId) // <--- escopo do dono
+            // pendentes primeiro, depois enviados, depois cancelados:
+            ->orderBy("FIELD(ma.status, 'pendente','enviado','cancelado')", '', false)
+            ->orderBy('ma.enviar_em', 'ASC');
+
+        if ($status !== '' && in_array($status, ['pendente','enviado','cancelado'], true)) {
+            $builder->where('ma.status', $status);
+        }
+
+        if ($q !== '') {
+            $builder->groupStart()
+                ->like('ma.numero', $q)
+                ->orLike('p.nome', $q)
+                ->orLike('ma.mensagem', $q)
+            ->groupEnd();
+        }
+
+        $items = $builder->get()->getResultArray();
+        return $this->response->setJSON(['items' => $items]);
     }
 
-    if ($q !== '') {
-        $builder->groupStart()
-            ->like('ma.numero', $q)
-            ->orLike('p.nome', $q)
-            ->orLike('ma.mensagem', $q)
-        ->groupEnd();
-    }
-
-    $items = $builder->get()->getResultArray();
-
-    return $this->response->setJSON(['items' => $items]);
-}
-
-    // Atualiza mensagem, data, hora e status
+    // Atualiza mensagem, data, hora e status (somente se o agendamento for do usuário logado)
     public function update($id)
     {
+        if (!$this->usuarioId) {
+            return $this->response->setStatusCode(401)->setJSON(['ok' => false, 'msg' => 'Não autenticado']);
+        }
+
         $id = (int) $id;
 
         $mensagem = trim((string)$this->request->getPost('mensagem'));
@@ -58,23 +75,29 @@ class Agendamentos extends Controller
         if ($mensagem === '' || $data === '' || $hora === '') {
             return $this->response->setJSON(['ok' => false, 'msg' => 'Preencha mensagem, data e hora.'])->setStatusCode(400);
         }
-        if (!in_array($status, ['pendente','enviado','cancelado'])) {
+        if (!in_array($status, ['pendente','enviado','cancelado'], true)) {
             return $this->response->setJSON(['ok' => false, 'msg' => 'Status inválido.'])->setStatusCode(400);
         }
 
         $enviarEm = date('Y-m-d H:i:s', strtotime("$data $hora"));
 
-        $db   = \Config\Database::connect();
-        $row  = $db->table('mensagens_agendadas')->where('id', $id)->get()->getFirstRow('array');
+        $db  = \Config\Database::connect();
+        $row = $db->table('mensagens_agendadas')
+            ->where('id', $id)
+            ->where('usuario_id', $this->usuarioId) // <--- garante permissão
+            ->get()->getFirstRow('array');
+
         if (!$row) {
-            return $this->response->setJSON(['ok' => false, 'msg' => 'Agendamento não encontrado.'])->setStatusCode(404);
+            return $this->response->setJSON(['ok' => false, 'msg' => 'Agendamento não encontrado ou sem permissão.'])->setStatusCode(404);
         }
 
         $payload = [
-            'mensagem'  => $mensagem,
-            'enviar_em' => $enviarEm,
-            'status'    => $status,
+            'mensagem'    => $mensagem,
+            'enviar_em'   => $enviarEm,
+            'status'      => $status,
+            'usuario_id'  => $this->usuarioId, // reforça dono
         ];
+
         if ($status === 'enviado' && empty($row['enviado_em'])) {
             $payload['enviado_em'] = date('Y-m-d H:i:s');
         }
@@ -87,14 +110,23 @@ class Agendamentos extends Controller
         return $this->response->setJSON(['ok' => true]);
     }
 
-    // Exclui o agendamento (remove da base)
+    // Exclui o agendamento (somente do usuário logado)
     public function delete($id)
     {
+        if (!$this->usuarioId) {
+            return $this->response->setStatusCode(401)->setJSON(['ok' => false, 'msg' => 'Não autenticado']);
+        }
+
         $id = (int) $id;
         $db = \Config\Database::connect();
-        $row = $db->table('mensagens_agendadas')->where('id', $id)->get()->getFirstRow('array');
+
+        $row = $db->table('mensagens_agendadas')
+            ->where('id', $id)
+            ->where('usuario_id', $this->usuarioId) // <--- garante permissão
+            ->get()->getFirstRow('array');
+
         if (!$row) {
-            return $this->response->setJSON(['ok' => false, 'msg' => 'Agendamento não encontrado.'])->setStatusCode(404);
+            return $this->response->setJSON(['ok' => false, 'msg' => 'Agendamento não encontrado ou sem permissão.'])->setStatusCode(404);
         }
 
         $db->table('mensagens_agendadas')->where('id', $id)->delete();

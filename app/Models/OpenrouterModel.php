@@ -8,11 +8,15 @@ class OpenrouterModel extends Model
 {
     private string $apiKey;
 
-    /** Modelo padrão (pode trocar por ENV ou parâmetro na chamada) */
+    /** Modelo padrão */
     private string $modeloPadrao = 'anthropic/claude-3-haiku';
 
     /** Máx. de mensagens no contexto */
     private int $maxJanelaHistorico = 40;
+
+    /** Limites default da base de conhecimento (podem ser sobrescritos por $opts) */
+    private int $maxKbItemsDefault  = 8;    // quantos itens no máximo
+    private int $maxKbCharsDefault  = 800;  // limite de caracteres por item
 
     public function __construct()
     {
@@ -29,9 +33,14 @@ class OpenrouterModel extends Model
      * @param array       $opts       Opções:
      *   - 'temperatura' (float): default 0.8
      *   - 'top_p' (float): default 0.9
-     *   - 'estiloMocinha' (bool): default **false** (use o prompt do get_prompt_padrao)
-     *   - 'continuityGuard' (bool): default **false** (use o prompt do get_prompt_padrao)
+     *   - 'estiloMocinha' (bool): default false
+     *   - 'continuityGuard' (bool): default false
      *   - 'max_tokens' (int|null)
+     *   - 'assinante_id' (int|null): se não vier, usa session('assinante_id')
+     *   - 'tags' (string|array|null): filtrar aprendizagem por tags (LIKE)
+     *   - 'etapa' (string|null): etapa atual; usada como tag extra (LIKE)
+     *   - 'max_kb' (int): quantos registros da aprendizagem injetar (default 8)
+     *   - 'max_kb_chars' (int): chars por item (default 800)
      */
     public function enviarMensagem(array $mensagens, ?string $modelo = null, array $opts = [])
     {
@@ -46,12 +55,17 @@ class OpenrouterModel extends Model
         $continuityGuard = array_key_exists('continuityGuard', $opts) ? (bool)$opts['continuityGuard'] : false;
         $maxTokens       = $opts['max_tokens'] ?? null;
 
+        $assinanteId     = isset($opts['assinante_id']) ? (int)$opts['assinante_id'] : (int)(session('assinante_id') ?? 0);
+        $tagsFiltro      = $opts['tags'] ?? null;   // string|array|null
+        $etapaFiltro     = isset($opts['etapa']) ? (string)$opts['etapa'] : null;
+
+        $maxKbItems      = isset($opts['max_kb']) ? max(0, (int)$opts['max_kb']) : $this->maxKbItemsDefault;
+        $maxKbChars      = isset($opts['max_kb_chars']) ? max(200, (int)$opts['max_kb_chars']) : $this->maxKbCharsDefault;
+
         // ---------- Prompt base vindo do get_prompt_padrao() ----------
         helper('ia');
-        $promptBase = get_prompt_padrao(); // <- usa seu prompt
+        $promptBase = get_prompt_padrao();
         if ($promptBase) {
-            // Garante que o prompt base seja a PRIMEIRA mensagem system
-            // (evita duplicar se já for exatamente o mesmo conteúdo)
             $jaTemIgual = false;
             foreach ($mensagens as $m) {
                 if (($m['role'] ?? '') === 'system' && isset($m['content']) && trim($m['content']) === trim($promptBase)) {
@@ -63,7 +77,7 @@ class OpenrouterModel extends Model
             }
         }
 
-        // ---------- Injeções opcionais (normalmente desnecessárias pois seu prompt já cobre) ----------
+        // ---------- Injeções opcionais ----------
         $injections = [];
         if ($estiloMocinha) {
             $injections[] = [
@@ -81,8 +95,21 @@ class OpenrouterModel extends Model
                     "se pedir preço/agenda/pagamento, responda objetivo e sem rodeios."
             ];
         }
+
+        // ---------- Injeção da Aprendizagem (base de conhecimento) ----------
+        // Se houver assinante, buscamos os textos ativos e montamos um system message.
+        if ($assinanteId) {
+            $kb = $this->carregarAprendizagemBase($assinanteId, $tagsFiltro, $etapaFiltro, $maxKbItems, $maxKbChars);
+            if ($kb) {
+                $kbHeader = "Base de conhecimento da clínica (use somente como contexto; se o usuário contradizer, priorize o que ele disser):\n";
+                $kbText = $kbHeader . implode("\n\n", $kb);
+
+                // Inserimos logo após o prompt base (primeira system)
+                $injections[] = ['role' => 'system', 'content' => $kbText];
+            }
+        }
+
         if (!empty($injections)) {
-            // injeta logo após o prompt base para manter prioridade
             array_splice($mensagens, 1, 0, $injections);
         }
 
@@ -93,7 +120,6 @@ class OpenrouterModel extends Model
 
         // ---------- Chamada OpenRouter ----------
         $url = 'https://openrouter.ai/api/v1/chat/completions';
-
         $headers = [
             'Authorization: Bearer ' . $this->apiKey,
             'Content-Type: application/json',
@@ -139,5 +165,80 @@ class OpenrouterModel extends Model
         }
 
         return $json['choices'][0]['message']['content'];
+    }
+
+    /**
+     * Busca a base de aprendizagem (`aprendizagem_base`) do assinante.
+     * Retorna uma lista de strings já “compactadas” para injeção no prompt.
+     *
+     * Regras:
+     *  - Somente registros `ativo=1` e do `assinante_id` informado.
+     *  - Se vierem `tags` e/ou `etapa`, aplico LIKE em `tags`.
+     *  - Limito quantidade e tamanho de cada item pra não estourar contexto.
+     *
+     * @param int               $assinanteId
+     * @param string|array|null $tags
+     * @param string|null       $etapa
+     * @param int               $limitQtde
+     * @param int               $limitChars
+     * @return array<string>
+     */
+    private function carregarAprendizagemBase(
+        int $assinanteId,
+        $tags = null,
+        ?string $etapa = null,
+        int $limitQtde = 8,
+        int $limitChars = 800
+    ): array {
+        $db = \Config\Database::connect();
+        $builder = $db->table('aprendizagens')
+            ->select('id, titulo, conteudo, tags')
+            ->where('assinante_id', $assinanteId)
+            ->where('ativo', 1);
+
+        // Normaliza filtros de tag
+        $termos = [];
+        if (is_string($tags) && $tags !== '') $termos[] = $tags;
+        if (is_array($tags)) {
+            foreach ($tags as $t) { $t = trim((string)$t); if ($t !== '') $termos[] = $t; }
+        }
+        if ($etapa) $termos[] = $etapa;
+
+        if (!empty($termos)) {
+            $builder->groupStart();
+            foreach ($termos as $i => $t) {
+                // busca por tags contendo o termo (case-insensitive em collation padrão utf8mb4_general_ci)
+                if ($i === 0) $builder->like('tags', $t, 'both');
+                else          $builder->orLike('tags', $t, 'both');
+            }
+            $builder->groupEnd();
+        }
+
+        // ordem: mais recentes primeiro
+        $builder->orderBy('id', 'DESC');
+
+        if ($limitQtde > 0) $builder->limit($limitQtde);
+
+        $rows = $builder->get()->getResultArray();
+        if (empty($rows)) return [];
+
+        $out = [];
+        foreach ($rows as $r) {
+            $titulo   = trim((string)($r['titulo'] ?? ''));
+            $conteudo = trim((string)($r['conteudo'] ?? ''));
+            $tagsStr  = trim((string)($r['tags'] ?? ''));
+
+            if ($limitChars > 0 && mb_strlen($conteudo, 'UTF-8') > $limitChars) {
+                $conteudo = mb_substr($conteudo, 0, $limitChars, 'UTF-8') . '…';
+            }
+
+            // Formato compacto por item
+            // Ex.: "- [Procedimentos] Informações gerais: ... \n  (tags: procedimentos, agenda)"
+            $linhaTitulo = $titulo !== '' ? "[{$titulo}] " : '';
+            $linhaTags   = $tagsStr !== '' ? "\n(tags: {$tagsStr})" : '';
+
+            $out[] = "- {$linhaTitulo}{$conteudo}{$linhaTags}";
+        }
+        return $out;
     }
 }

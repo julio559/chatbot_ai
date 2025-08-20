@@ -3,17 +3,16 @@ namespace App\Models;
 
 use CodeIgniter\Model;
 
-class NotificacaoNumeroModel extends Model
+class NotificacaoRegraModel extends Model
 {
-    protected $table         = 'notificacoes_numeros'; // TABELA CORRETA
-    protected $primaryKey    = 'id';
-    protected $returnType    = 'array';
+    protected $table       = 'notificacoes_regras';
+    protected $primaryKey  = 'id';
+    protected $returnType  = 'array';
 
     protected $allowedFields = [
         'assinante_id',
-        'usuario_id',
-        'numero',
-        'descricao',
+        'etapa',
+        'mensagem_template',
         'ativo',
         'criado_em',
         'atualizado_em',

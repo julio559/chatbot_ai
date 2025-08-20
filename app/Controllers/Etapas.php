@@ -7,7 +7,15 @@ use CodeIgniter\Controller;
 
 class Etapas extends Controller
 {
-    protected int $assinanteId = 1;
+    protected ?int $usuarioId   = null;
+    protected ?int $assinanteId = null;
+
+    public function __construct()
+    {
+        $this->usuarioId   = (int) (session()->get('usuario_id')   ?? 0) ?: null;
+        // fallback 1 até o login estar ativo
+        $this->assinanteId = (int) (session()->get('assinante_id') ?? 0) ?: 1;
+    }
 
     public function index()
     {
@@ -18,8 +26,8 @@ class Etapas extends Controller
                         ->findAll();
 
         return view('etapas', [
-            'etapas' => $etapas,
-            'validation' => \Config\Services::validation()
+            'etapas'     => $etapas,
+            'validation' => \Config\Services::validation(),
         ]);
     }
 
@@ -31,14 +39,13 @@ class Etapas extends Controller
         $id = (int) ($this->request->getPost('id') ?? 0);
 
         $rules = [
-            'etapa_atual'     => 'required|min_length[2]|max_length[50]',
-            'tempo_resposta'  => 'required|integer|greater_than_equal_to[0]|less_than_equal_to[60]',
+            'etapa_atual'    => 'required|min_length[2]|max_length[50]',
+            'tempo_resposta' => 'required|integer|greater_than_equal_to[0]|less_than_equal_to[60]',
         ];
         if (! $this->validate($rules)) {
             return redirect()->to('/etapas')->with('errors', $this->validator->getErrors())->withInput();
         }
 
-        // Normaliza nome (tira espaços extras)
         $novoNomeEtapa = trim((string) $this->request->getPost('etapa_atual'));
 
         $data = [
@@ -52,29 +59,37 @@ class Etapas extends Controller
         ];
 
         if ($id > 0) {
-            // EDITAR: se o nome mudou, mover todas as sessões da etapa antiga para a nova
-            $etapaAntiga = $model->find($id);
+            // EDITAR
+            $etapaAntiga = $model->where('assinante_id', $this->assinanteId)->find($id);
             if (! $etapaAntiga) {
                 return redirect()->to('/etapas')->with('errors', ['notfound' => 'Etapa não encontrada.']);
             }
 
             $nomeAntigo = trim((string) ($etapaAntiga['etapa_atual'] ?? ''));
 
-            // Transação para garantir consistência
-            $db->transBegin();
-
-            // Atualiza a etapa no config_ia
-            $model->update($id, $data);
-
-            // Se o nome mudou, move as sessões
-            if ($nomeAntigo !== '' && $novoNomeEtapa !== '' && $nomeAntigo !== $novoNomeEtapa) {
-                // Move todos os leads que estavam na etapa antiga para a nova
-                $db->table('sessoes')
-                   ->where('etapa', $nomeAntigo)
-                   ->update(['etapa' => $novoNomeEtapa]);
+            // Garante unicidade por assinante (nome da etapa)
+            $dupe = $model->where('assinante_id', $this->assinanteId)
+                          ->where('etapa_atual', $novoNomeEtapa)
+                          ->where('id !=', $id)
+                          ->first();
+            if ($dupe) {
+                return redirect()->to('/etapas')->with('errors', ['duplicada' => 'Já existe uma etapa com esse nome.'])->withInput();
             }
 
-            // Finaliza transação
+            $db->transBegin();
+
+            $model->update($id, $data);
+
+            // Se o nome mudou, move as sessões SOMENTE dos usuários desse assinante
+            if ($nomeAntigo !== '' && $novoNomeEtapa !== '' && $nomeAntigo !== $novoNomeEtapa) {
+                // Usamos SQL direto para garantir WHERE com JOIN
+                $sql = "UPDATE sessoes s
+                        JOIN usuarios u ON u.id = s.usuario_id
+                        SET s.etapa = ?
+                        WHERE s.etapa = ? AND u.assinante_id = ?";
+                $db->query($sql, [$novoNomeEtapa, $nomeAntigo, $this->assinanteId]);
+            }
+
             if ($db->transStatus() === false) {
                 $db->transRollback();
                 return redirect()->to('/etapas')->with('errors', ['db' => 'Falha ao salvar etapa.'])->withInput();
@@ -83,11 +98,19 @@ class Etapas extends Controller
 
             return redirect()->to('/etapas')->with('msg', 'Etapa atualizada com sucesso!');
         } else {
-            // CRIAR: define ordem = max + 1
+            // CRIAR
+            // Garante unicidade por assinante
+            $dupe = $model->where('assinante_id', $this->assinanteId)
+                          ->where('etapa_atual', $novoNomeEtapa)
+                          ->first();
+            if ($dupe) {
+                return redirect()->to('/etapas')->with('errors', ['duplicada' => 'Já existe uma etapa com esse nome.'])->withInput();
+            }
+
+            // ordem = max + 1 por assinante
             $max = $model->where('assinante_id', $this->assinanteId)
                          ->selectMax('ordem')->first();
-            $proximaOrdem = (int) ($max['ordem'] ?? 0) + 1;
-            $data['ordem'] = $proximaOrdem;
+            $data['ordem'] = (int) ($max['ordem'] ?? 0) + 1;
 
             $model->insert($data);
             return redirect()->to('/etapas')->with('msg', 'Etapa criada com sucesso!');
@@ -97,10 +120,14 @@ class Etapas extends Controller
     public function delete($id)
     {
         $model = new ConfigIaModel();
-        if (! $model->find($id)) {
+
+        // garante escopo por assinante
+        $row = $model->where('assinante_id', $this->assinanteId)->find((int)$id);
+        if (! $row) {
             return redirect()->to('/etapas')->with('errors', ['notfound' => 'Etapa não encontrada.']);
         }
-        $model->delete($id);
+
+        $model->delete((int)$id);
         return redirect()->to('/etapas')->with('msg', 'Etapa excluída com sucesso!');
     }
 
@@ -117,9 +144,19 @@ class Etapas extends Controller
         }
 
         $model = new ConfigIaModel();
+
+        // Trava aos IDs do assinante corrente
+        $validos = $model->where('assinante_id', $this->assinanteId)
+                         ->whereIn('id', array_map('intval', $ids))
+                         ->select('id')
+                         ->findColumn('id') ?? [];
+
         $ordem = 0;
         foreach ($ids as $id) {
-            $model->update((int)$id, ['ordem' => $ordem++]);
+            $iid = (int)$id;
+            if (in_array($iid, $validos, true)) {
+                $model->update($iid, ['ordem' => $ordem++]);
+            }
         }
 
         return $this->response->setJSON(['ok' => true]);
@@ -139,19 +176,22 @@ class Etapas extends Controller
     private function swapVizinho(int $id, string $dir)
     {
         $model = new ConfigIaModel();
-        $atual = $model->find($id);
-        if (!$atual) return redirect()->to('/etapas')->with('errors', ['notfound' => 'Etapa não encontrada.']);
 
-        $assinante = $this->assinanteId;
+        // escopo por assinante
+        $atual = $model->where('assinante_id', $this->assinanteId)->find($id);
+        if (!$atual) {
+            return redirect()->to('/etapas')->with('errors', ['notfound' => 'Etapa não encontrada.']);
+        }
+
         $ordemAtual = (int)$atual['ordem'];
 
         if ($dir === 'cima') {
-            $vizinho = $model->where('assinante_id', $assinante)
+            $vizinho = $model->where('assinante_id', $this->assinanteId)
                              ->where('ordem <', $ordemAtual)
                              ->orderBy('ordem', 'DESC')
                              ->first();
         } else {
-            $vizinho = $model->where('assinante_id', $assinante)
+            $vizinho = $model->where('assinante_id', $this->assinanteId)
                              ->where('ordem >', $ordemAtual)
                              ->orderBy('ordem', 'ASC')
                              ->first();
