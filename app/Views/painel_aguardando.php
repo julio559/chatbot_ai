@@ -7,7 +7,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Pacientes | CRM da Dra. Bruna Sathler</title>
+  <title>Pacientes | CRM </title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {

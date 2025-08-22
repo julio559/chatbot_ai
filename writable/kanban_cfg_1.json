@@ -1,0 +1,10 @@
+{
+    "inicio": {
+        "titulo": "",
+        "wip": 0,
+        "destacar_horas": 0,
+        "cor_borda": "#0a4561",
+        "bloquear_ia": false,
+        "template": ""
+    }
+}

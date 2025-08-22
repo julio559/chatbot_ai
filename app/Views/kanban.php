@@ -19,9 +19,9 @@ $colunas = $colunas ?? [];
     .fade-enter{opacity:0;transform:translateY(6px)}
     .fade-enter-active{opacity:1;transform:translateY(0);transition:all .18s ease}
     /* animação suave ao abrir */
-.modal-card{opacity:.0; transform:translateY(6px) scale(.98); transition:opacity .18s ease, transform .18s ease;}
-#modalLead.flex .modal-card{opacity:1; transform:none;}
-
+    .modal-card{opacity:.0; transform:translateY(6px) scale(.98); transition:opacity .18s ease, transform .18s ease;}
+    #modalLead.flex .modal-card{opacity:1; transform:none;}
+    #modalConfigColuna.flex .modal-card{opacity:1; transform:none;}
   </style>
 </head>
 <body class="bg-slate-50 text-slate-800">
@@ -70,7 +70,9 @@ $colunas = $colunas ?? [];
                 <?php if ($coluna['etapa'] == $key): ?>
                   <?php foreach ($coluna['clientes'] as $lead): ?>
                     <div class="kanban-card bg-slate-50 hover:bg-slate-100 border border-slate-200 p-3 rounded-xl shadow-sm text-sm select-none cursor-grab"
-                         data-lead-id="<?= esc($lead['numero']) ?>" id="lead-<?= esc($lead['numero']) ?>">
+                         data-lead-id="<?= esc($lead['numero']) ?>"
+                         data-updated-at="<?= esc($lead['ultimo_contato'] ?? '') ?>"
+                         id="lead-<?= esc($lead['numero']) ?>">
                       <div class="flex items-center justify-between gap-2">
                         <div class="font-medium text-slate-800 ellipsis" title="<?= esc($lead['numero']) ?>"><?= esc(mb_strimwidth($lead['numero'], 0, 16, '…', 'UTF-8')) ?></div>
                         <div class="flex flex-wrap gap-1" data-tags-holder></div>
@@ -114,7 +116,6 @@ $colunas = $colunas ?? [];
   </div>
 </div>
 
-<!-- Modal: Detalhes do Lead -->
 <!-- Modal: Detalhes do Lead (NOVA VERSÃO BONITA) -->
 <div id="modalLead" class="fixed inset-0 z-50 hidden items-center justify-center">
   <!-- Overlay -->
@@ -294,6 +295,77 @@ $colunas = $colunas ?? [];
   </div>
 </div>
 
+<!-- Modal: Configurar Coluna -->
+<div id="modalConfigColuna" class="fixed inset-0 z-50 hidden items-center justify-center">
+  <div class="absolute inset-0 bg-slate-900/50" onclick="fecharModal('modalConfigColuna')"></div>
+
+  <div class="relative w-[min(92vw,720px)] max-h-[92vh] overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/5 modal-card"
+       onclick="event.stopPropagation()">
+    <!-- Header -->
+    <div class="relative bg-gradient-to-r from-sky-600 via-indigo-600 to-fuchsia-600 text-white px-6 py-5">
+      <div class="flex items-center justify-between gap-4">
+        <div class="min-w-0">
+          <h3 class="text-lg font-semibold leading-tight">
+            Configurar coluna <span id="cfgEtapaKey" class="opacity-90 font-normal"></span>
+          </h3>
+          <p class="text-[12px] opacity-90 truncate">Ajuste nome, limites e aparência dessa etapa.</p>
+        </div>
+        <button class="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-sm ring-1 ring-white/20"
+                onclick="fecharModal('modalConfigColuna')">Fechar ✕</button>
+      </div>
+    </div>
+
+    <!-- Conteúdo -->
+    <div class="p-6 overflow-y-auto" style="max-height: calc(92vh - 140px)">
+      <form id="formConfigColuna" class="grid grid-cols-1 md:grid-cols-2 gap-4" onsubmit="return false;">
+        <?= csrf_field() ?>
+
+        <div class="md:col-span-2">
+          <label class="block text-sm mb-1">Título visível da coluna</label>
+          <input id="cfgTitulo" type="text" class="w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900" placeholder="ex.: Em contato">
+          <p class="text-[11px] text-slate-500 mt-1">Se vazio, usamos o título padrão da etapa.</p>
+        </div>
+
+        <div>
+          <label class="block text-sm mb-1">WIP (limite de cards)</label>
+          <input id="cfgWip" type="number" min="0" class="w-full border rounded-xl px-3 py-2" placeholder="0 = sem limite">
+        </div>
+
+        <div>
+          <label class="block text-sm mb-1">Destacar após (horas)</label>
+          <input id="cfgSLA" type="number" min="0" class="w-full border rounded-xl px-3 py-2" placeholder="ex.: 24">
+          <p class="text-[11px] text-slate-500 mt-1">Cards sem atualização acima disso ficam “alerta”.</p>
+        </div>
+
+        <div>
+          <label class="block text-sm mb-1">Cor da borda da coluna</label>
+          <input id="cfgCor" type="color" class="h-10 w-16 p-1 border rounded" value="#0ea5e9">
+        </div>
+
+        <div>
+          <label class="block text-sm mb-1">Bloquear resposta da IA nesta etapa</label>
+          <select id="cfgBloqIA" class="w-full border rounded-xl px-3 py-2">
+            <option value="0">Não</option>
+            <option value="1">Sim</option>
+          </select>
+        </div>
+
+        <div class="md:col-span-2">
+          <label class="block text-sm mb-1">Template de mensagem automática ao mover para esta etapa</label>
+          <textarea id="cfgTemplate" rows="4" class="w-full border rounded-xl px-3 py-2" placeholder="Texto opcional. Variáveis disponíveis: {{nome}}, {{telefone}}, {{etapa}}"></textarea>
+        </div>
+
+        <div class="md:col-span-2 flex items-center justify-end gap-2 pt-2">
+          <button type="button" class="px-4 py-2 rounded-lg bg-slate-100" onclick="fecharModal('modalConfigColuna')">Cancelar</button>
+          <button type="button" id="btnTestarConfig" class="px-4 py-2 rounded-lg bg-amber-600 text-white">Testar envio</button>
+          <button type="submit" class="px-4 py-2 rounded-lg bg-slate-900 text-white">Salvar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+
 <!-- Toasts -->
 <div id="toasts" class="fixed bottom-4 right-4 z-50 space-y-2"></div>
 
@@ -367,8 +439,8 @@ function excluirArquivo(id){
     .catch(function(){ toast('Erro ao excluir.','error'); });
 }
 
-function abrirModal(id){ var m=document.getElementById(id); m.classList.remove('hidden'); m.classList.add('flex'); }
-function fecharModal(id){ var m=document.getElementById(id); m.classList.add('hidden'); m.classList.remove('flex'); }
+function abrirModal(id){ var m=document.getElementById(id); if(!m) return; m.classList.remove('hidden'); m.classList.add('flex'); }
+function fecharModal(id){ var m=document.getElementById(id); if(!m) return; m.classList.add('hidden'); m.classList.remove('flex'); }
 function toast(msg,type){ if(!type) type='default'; var t=document.createElement('div'); t.className='fade-enter px-4 py-2 rounded-xl shadow text-sm text-white '+(type==='error'?'bg-red-600':type==='success'?'bg-emerald-600':'bg-slate-900'); t.textContent=msg; var w=document.getElementById('toasts'); w.appendChild(t); setTimeout(function(){ t.classList.add('fade-enter-active'); },0); setTimeout(function(){ t.remove(); },2400); }
 function esc(t){ return (t||'').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function formatarData(iso){ if(!iso) return '-'; var d=new Date(String(iso).replace(' ','T')); if(isNaN(d)) return iso; return d.toLocaleString(); }
@@ -376,8 +448,10 @@ function contrastOn(hex){ try{ var c=parseInt(hex.replace('#',''),16); var r=(c>
 
 // ===== Busca global =====
 var filtro=document.getElementById('filtroGlobal'); var buscaTimer=null;
-filtro.addEventListener('input', function(){ clearTimeout(buscaTimer); buscaTimer=setTimeout(function(){ filtrarCards(filtro.value); },180); });
-document.addEventListener('keydown', function(e){ if(e.key==='/'){ if(document.activeElement!==filtro){ e.preventDefault(); filtro.focus(); } } });
+if (filtro) {
+  filtro.addEventListener('input', function(){ clearTimeout(buscaTimer); buscaTimer=setTimeout(function(){ filtrarCards(filtro.value); },180); });
+  document.addEventListener('keydown', function(e){ if(e.key==='/'){ if(document.activeElement!==filtro){ e.preventDefault(); filtro.focus(); } } });
+}
 function filtrarCards(q){ q=(q||'').toLowerCase(); var cards=document.querySelectorAll('.kanban-card'); for(var i=0;i<cards.length;i++){ var card=cards[i]; var text=card.innerText.toLowerCase(); card.style.display=text.indexOf(q)>-1?'':'none'; } atualizarCounters(); }
 
 // ===== WIP counter =====
@@ -389,6 +463,13 @@ function atualizarCounters(){
     var badge=col.querySelector('[data-col-count]');
     var count = body ? body.querySelectorAll('.kanban-card:not([style*="display: none"])').length : 0;
     if (badge) badge.textContent = count;
+
+    // Ajuste visual de WIP no header, se houver config
+    var key = col.getAttribute('data-etapa-key');
+    var cfg = (window.cfgCache && window.cfgCache[key]) || {};
+    var wip = (typeof cfg.wip === 'number' ? cfg.wip : 0);
+    var header = col.querySelector('.sticky');
+    if (header) header.style.background = (wip > 0 && count > wip) ? 'rgba(250,204,21,0.15)' : 'rgba(255,255,255,0.9)';
   }
 }
 
@@ -412,7 +493,21 @@ document.addEventListener('DOMContentLoaded', function(){
           url:'<?= base_url("kanban/atualizarEtapa") ?>',
           method:'POST',
           data: (function(){ var o={}; o[csrfName]=csrfHash; o.numero=leadId; o.etapa=destinoEtapa; return o; })(),
-          success:function(r){ if(r && r.status==='ok'){ toast('Lead movido!','success'); atualizarCounters(); } else { alert((r&&r.message)||'Erro ao mover o lead!'); } },
+          success:function(r){
+            if(r && r.status==='ok'){
+              toast('Lead movido!','success');
+              atualizarCounters();
+              // reaplica visuais na coluna destino e SLA geral
+              var col = evt.to.closest('.kanban-column');
+              if (col) {
+                var colKey = col.getAttribute('data-etapa-key');
+                if (colKey && window.cfgCache && window.cfgCache[colKey]) {
+                  aplicarConfigVisual(colKey, window.cfgCache[colKey]);
+                }
+              }
+              aplicarSLAEmCards();
+            } else { alert((r&&r.message)||'Erro ao mover o lead!'); }
+          },
           error:function(){ alert('Erro na requisição AJAX'); }
         });
       }
@@ -438,27 +533,47 @@ document.addEventListener('DOMContentLoaded', function(){
   atualizarCounters();
 
   // Criar Tag
-  document.getElementById('btnAbrirCriarTag').addEventListener('click', function(){
-    document.getElementById('tagNome').value='';
-    document.getElementById('tagCor').value='#3b82f6';
-    abrirModal('modalCriarTag');
-  });
-  document.getElementById('formCriarTag').addEventListener('submit', function(e){
-    e.preventDefault();
-    var nome=document.getElementById('tagNome').value.trim();
-    var cor=document.getElementById('tagCor').value;
-    if(!nome) return;
-    var fd=new FormData();
-    fd.append(csrfName, csrfHash);
-    fd.append('nome', nome);
-    fd.append('cor', cor);
-    fetch('<?= base_url("kanban/tags") ?>', { method:'POST', body: fd })
-      .then(function(r){ if(!r.ok) throw new Error(); return r.json().catch(function(){return {ok:true};}); })
-      .then(function(){ fecharModal('modalCriarTag'); carregarTagsNosCards(); toast('Tag criada!','success'); })
-      .catch(function(){ toast('Erro ao criar tag','error'); });
-  });
+  var btnCriar = document.getElementById('btnAbrirCriarTag');
+  if (btnCriar) {
+    btnCriar.addEventListener('click', function(){
+      document.getElementById('tagNome').value='';
+      document.getElementById('tagCor').value='#3b82f6';
+      abrirModal('modalCriarTag');
+    });
+  }
+  var formTag = document.getElementById('formCriarTag');
+  if (formTag) {
+    formTag.addEventListener('submit', function(e){
+      e.preventDefault();
+      var nome=document.getElementById('tagNome').value.trim();
+      var cor=document.getElementById('tagCor').value;
+      if(!nome) return;
+      var fd=new FormData();
+      fd.append(csrfName, csrfHash);
+      fd.append('nome', nome);
+      fd.append('cor', cor);
+      fetch('<?= base_url("kanban/tags") ?>', { method:'POST', body: fd })
+        .then(function(r){ if(!r.ok) throw new Error(); return r.json().catch(function(){return {ok:true};}); })
+        .then(function(){ fecharModal('modalCriarTag'); carregarTagsNosCards(); toast('Tag criada!','success'); })
+        .catch(function(){ toast('Erro ao criar tag','error'); });
+    });
+  }
+
+  // === Bind do modal de Configurar Coluna
+  var formCfg = document.getElementById('formConfigColuna');
+  if (formCfg) {
+    formCfg.addEventListener('submit', function(e){ e.preventDefault(); salvarConfigColuna(); });
+  }
+  var btnTest = document.getElementById('btnTestarConfig');
+  if (btnTest) {
+    btnTest.addEventListener('click', function(){ testarConfigColuna(); });
+  }
+
+  // Carrega configurações existentes
+  carregarConfigsEtapas();
 });
 
+// ===== Tabs do Lead =====
 function initLeadTabs(){
   var tabs = document.querySelectorAll('#leadTabs [data-tab]');
   var panels = document.querySelectorAll('[data-lead-panel]');
@@ -466,13 +581,11 @@ function initLeadTabs(){
     (function(btn){
       btn.addEventListener('click', function(){
         var tab = btn.getAttribute('data-tab');
-        // ativa aba
         for (var j=0;j<tabs.length;j++){
           tabs[j].classList.remove('border-slate-900','text-slate-900');
           tabs[j].classList.add('border-transparent','text-slate-500');
         }
         btn.classList.add('border-slate-900','text-slate-900');
-        // mostra painel
         for (var k=0;k<panels.length;k++){
           var p = panels[k];
           p.classList.toggle('hidden', p.getAttribute('data-lead-panel') !== tab);
@@ -498,7 +611,6 @@ function copyPhone(){
     if (navigator.clipboard && navigator.clipboard.writeText){
       navigator.clipboard.writeText(t).then(function(){ toast('Telefone copiado!','success'); });
     } else {
-      // fallback
       var ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta);
       ta.select(); document.execCommand('copy'); ta.remove(); toast('Telefone copiado!','success');
     }
@@ -511,14 +623,11 @@ function resetLeadTabsToOverview(){
   if (firstTab) firstTab.click();
 }
 
-// Hook no seu abrirModalLead: já está chamando abrirModal('modalLead'), então só garanto avatar & tabs
+// Hook no seu abrirModalLead
 (function(){
-  // Se você já tem abrirModalLead definido, apenas "decoramos" depois de preencher dados:
   var _abrirModalLead = abrirModalLead;
   abrirModalLead = function(numero, cardEl){
-    // chama a implementação original
     _abrirModalLead(numero, cardEl);
-    // inicializa tabs na primeira vez
     setTimeout(function(){
       initLeadTabs();
       resetLeadTabsToOverview();
@@ -553,11 +662,12 @@ function abrirModalLead(numero, cardEl){
       document.getElementById('btnSalvarLeadTags').onclick = function(){ salvarLeadTags(leadAtualNumero); };
       document.getElementById('btnSalvarNota').onclick     = function(){ salvarNota(leadAtualNumero); };
       document.getElementById('btnAgendar').onclick        = function(){ agendarMensagem(leadAtualNumero); };
-carregarArquivos(numero);
-document.getElementById('btnUploadArq').onclick = function(){ uploadArquivo(leadAtualNumero); };
+      carregarArquivos(numero);
+      var upBtn = document.getElementById('btnUploadArq');
+      if (upBtn) upBtn.onclick = function(){ uploadArquivo(leadAtualNumero); };
 
       abrirModal('modalLead');
-
+      setLeadAvatar(document.getElementById('detNome').textContent || numero);
     })
     .catch(function(){ toast('Erro ao carregar detalhes','error'); });
 }
@@ -725,9 +835,157 @@ function cancelarAgendamento(id){
     .catch(function(){ toast('Erro ao cancelar.','error'); });
 }
 
-// ====== Config Coluna (só para não quebrar o botão ⚙️) ======
+/* ===================== CONFIGURAR COLUNA (MODAL + BACKEND) ===================== */
+var cfgCache = {};          // { etapaKey: cfg }
+var etapaEmEdicao = null;
+
 function abrirConfigColuna(key, title){
-  toast('Configurar coluna "'+title+'" (em breve).','default');
+  etapaEmEdicao = key;
+  document.getElementById('cfgEtapaKey').textContent = '('+ key +')';
+
+  // limpa form
+  preencherFormConfig({});
+
+  // busca config do backend
+  fetch('<?= base_url("kanban/etapa-config") ?>/' + encodeURIComponent(key))
+    .then(function(r){ if(!r.ok) throw new Error(); return r.json(); })
+    .then(function(cfg){
+      cfgCache[key] = cfg || {};
+      preencherFormConfig(cfgCache[key]);
+      abrirModal('modalConfigColuna');
+    })
+    .catch(function(){
+      abrirModal('modalConfigColuna');
+    });
+}
+
+function preencherFormConfig(cfg){
+  cfg = cfg || {};
+  document.getElementById('cfgTitulo').value   = cfg.titulo || '';
+  document.getElementById('cfgWip').value      = (typeof cfg.wip === 'number' ? String(cfg.wip) : '');
+  document.getElementById('cfgSLA').value      = (typeof cfg.destacar_horas === 'number' ? String(cfg.destacar_horas) : '');
+  document.getElementById('cfgCor').value      = cfg.cor_borda || '#0ea5e9';
+  document.getElementById('cfgBloqIA').value   = (cfg.bloquear_ia ? '1' : '0');
+  document.getElementById('cfgTemplate').value = cfg.template || '';
+}
+function coletarFormConfig(){
+  var wip = parseInt(document.getElementById('cfgWip').value,10);
+  var sla = parseInt(document.getElementById('cfgSLA').value,10);
+  return {
+    titulo: (document.getElementById('cfgTitulo').value||'').trim(),
+    wip: isNaN(wip)?0:wip,
+    destacar_horas: isNaN(sla)?0:sla,
+    cor_borda: document.getElementById('cfgCor').value || '#0ea5e9',
+    bloquear_ia: document.getElementById('cfgBloqIA').value === '1',
+    template: (document.getElementById('cfgTemplate').value||'').trim()
+  };
+}
+function salvarConfigColuna(){
+  if (!etapaEmEdicao) return;
+  var cfg = coletarFormConfig();
+  var fd = new FormData();
+  fd.append('json', JSON.stringify(cfg));
+  fd.append(csrfName, csrfHash);
+
+  fetch('<?= base_url("kanban/etapa-config") ?>/' + encodeURIComponent(etapaEmEdicao), { method:'POST', body: fd })
+    .then(function(r){ if(!r.ok) throw new Error(); return r.json(); })
+    .then(function(){
+      cfgCache[etapaEmEdicao] = cfg;
+      aplicarConfigVisual(etapaEmEdicao, cfg);
+      aplicarSLAEmCards(); // reavalia SLA
+      toast('Configuração salva!','success');
+      fecharModal('modalConfigColuna');
+    })
+    .catch(function(){ toast('Erro ao salvar configuração','error'); });
+}
+function testarConfigColuna(){
+  if (!etapaEmEdicao) return;
+  var cfg = coletarFormConfig();
+  var fd = new FormData();
+  fd.append('json', JSON.stringify(cfg));
+  fd.append(csrfName, csrfHash);
+
+  fetch('<?= base_url("kanban/etapa-config/teste") ?>/' + encodeURIComponent(etapaEmEdicao), { method:'POST', body: fd })
+    .then(function(r){ if(!r.ok) throw new Error(); return r.json(); })
+    .then(function(resp){ toast((resp && resp.msg) ? resp.msg : 'Template recebido para teste.','success'); })
+    .catch(function(){ toast('Falha no teste da configuração','error'); });
+}
+
+function aplicarConfigVisual(etapaKey, cfg){
+  var col = document.querySelector('.kanban-column[data-etapa-key="'+ etapaKey +'"]');
+  if (!col) return;
+
+  // Título
+  var titleEl = col.querySelector('.sticky .font-semibold');
+  if (titleEl) {
+    var fallback = titleEl.getAttribute('title') || titleEl.textContent || '';
+    var nome = (cfg.titulo && cfg.titulo.trim()) ? cfg.titulo.trim() : fallback;
+    titleEl.textContent = nome;
+    titleEl.setAttribute('title', nome);
+  }
+
+  // Borda/anel
+  var color = cfg.cor_borda || '';
+  if (color) {
+    col.style.boxShadow = 'inset 0 0 0 2px ' + color + '22';
+    var colBody = col.querySelector('.cards-container');
+    if (colBody) colBody.style.borderColor = color + '55';
+  }
+
+  // WIP header highlight
+  var wip = (typeof cfg.wip === 'number' ? cfg.wip : 0);
+  var body = col.querySelector('.cards-container');
+  var header = col.querySelector('.sticky');
+  if (body && header) {
+    var count = body.querySelectorAll('.kanban-card:not([style*="display: none"])').length;
+    header.style.background = (wip > 0 && count > wip) ? 'rgba(250,204,21,0.15)' : 'rgba(255,255,255,0.9)';
+  }
+}
+
+function aplicarSLAEmCards(){
+  var cols = document.querySelectorAll('.kanban-column[data-etapa-key]');
+  for (var i=0;i<cols.length;i++){
+    var key  = cols[i].getAttribute('data-etapa-key');
+    var cfg  = cfgCache[key] || {};
+    var slaH = parseInt(cfg.destacar_horas || 0, 10);
+    var wrap = cols[i].querySelector('.cards-container');
+    if (!wrap || !slaH) continue;
+    var cards = wrap.querySelectorAll('.kanban-card');
+    for (var j=0;j<cards.length;j++){
+      var card = cards[j];
+      var updatedAt = card.getAttribute('data-updated-at') || '';
+      if (!updatedAt) { card.style.outline=''; card.style.background=''; continue; }
+      var ts = Date.parse(String(updatedAt).replace(' ','T'));
+      if (!isNaN(ts)) {
+        var horas = (Date.now() - ts)/(1000*60*60);
+        if (horas >= slaH) {
+          card.style.outline = '2px solid #f59e0b'; // âmbar
+          card.style.background = '#fff7ed';
+        } else {
+          card.style.outline = '';
+          card.style.background = '';
+        }
+      }
+    }
+  }
+}
+
+function carregarConfigsEtapas(){
+  var cols = document.querySelectorAll('.kanban-column[data-etapa-key]');
+  for (var i=0;i<cols.length;i++){
+    (function(col){
+      var key = col.getAttribute('data-etapa-key');
+      fetch('<?= base_url("kanban/etapa-config") ?>/' + encodeURIComponent(key))
+        .then(function(r){ if(!r.ok) throw new Error(); return r.json(); })
+        .then(function(cfg){
+          cfgCache[key] = cfg || {};
+          aplicarConfigVisual(key, cfgCache[key]);
+        })
+        .catch(function(){ /* sem config ainda */ });
+    })(cols[i]);
+  }
+  // aplica SLA após breve atraso (garante DOM pronto)
+  setTimeout(aplicarSLAEmCards, 120);
 }
 </script>
 </body>
