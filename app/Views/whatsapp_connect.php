@@ -11,9 +11,7 @@
       boxShadow: { soft:'0 6px 18px rgba(0,0,0,.06)' }
     }}}
   </script>
-  <style>
-    .hidden{display:none}
-  </style>
+  <style>.hidden{display:none}</style>
 </head>
 <body class="bg-slate-50 text-slate-800">
   <div class="flex min-h-screen">
@@ -25,7 +23,7 @@
           <div class="flex items-center justify-between gap-4">
             <div class="min-w-0">
               <h1 class="text-2xl font-semibold text-slate-900">Instâncias do WhatsApp</h1>
-              <p class="text-sm text-slate-600">Gerencie suas instâncias UltraMSG (múltiplas por usuário).</p>
+              <p class="text-sm text-slate-600">Gerencie suas instâncias do <b>Gateway</b> (múltiplas por usuário).</p>
             </div>
             <button id="btnNovo" class="px-4 py-2 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700">
               + Nova instância
@@ -41,7 +39,7 @@
               <tr>
                 <th class="px-4 py-3 text-left">Nome</th>
                 <th class="px-4 py-3 text-left">Linha</th>
-                <th class="px-4 py-3 text-left">Instance ID</th>
+                <th class="px-4 py-3 text-left">Sessão (sid)</th>
                 <th class="px-4 py-3 text-left">Webhook</th>
                 <th class="px-4 py-3 text-left">Status</th>
                 <th class="px-4 py-3 text-right">Ações</th>
@@ -49,11 +47,11 @@
             </thead>
             <tbody class="divide-y" id="tbody">
               <?php foreach (($instancias ?? []) as $i): ?>
-              <?php $connected = ($i['conn_status'] ?? '') === 'authenticated'; ?>
+              <?php $connected = in_array(($i['conn_status'] ?? ''), ['authenticated','connected'], true); ?>
               <tr class="hover:bg-slate-50">
                 <td class="px-4 py-3"><?= esc($i['nome']) ?></td>
                 <td class="px-4 py-3"><?= esc($i['linha_msisdn'] ?? '-') ?></td>
-                <td class="px-4 py-3"><?= esc($i['instance_id']) ?></td>
+                <td class="px-4 py-3"><?= esc($i['sid'] ?? $i['instance_id'] ?? '-') ?></td>
                 <td class="px-4 py-3"><?= esc($i['webhook_url'] ?: '-') ?></td>
                 <td class="px-4 py-3">
                   <span class="inline-flex items-center gap-2">
@@ -106,13 +104,9 @@
           <p class="text-xs text-slate-500 mt-1">Somente dígitos. Ex.: 55 + DDD + número.</p>
         </div>
         <div>
-          <label class="text-sm text-slate-600">Instance ID</label>
-          <input id="mInstance" class="mt-1 w-full border rounded-xl px-3 py-2" placeholder="ex.: instance123456" required>
-        </div>
-        <div>
-          <label class="text-sm text-slate-600">Token</label>
-          <input id="mToken" class="mt-1 w-full border rounded-xl px-3 py-2" placeholder="seu-token-ultramsg">
-          <p class="text-xs text-slate-500 mt-1">Ao editar, deixe em branco para manter o token atual.</p>
+          <label class="text-sm text-slate-600">Sessão (sid)</label>
+          <input id="mSid" class="mt-1 w-full border rounded-xl px-3 py-2" placeholder="ex.: Recepcao-01" required>
+          <p class="text-xs text-slate-500 mt-1">Se existir, será reusada; se não existir, o gateway cria.</p>
         </div>
         <div>
           <label class="text-sm text-slate-600">Webhook (padrão do sistema)</label>
@@ -155,7 +149,7 @@
 
       <div class="mt-3 p-3 rounded-xl bg-slate-50 ring-1 ring-slate-200 text-sm">
         Status: <b id="qrStatus">—</b>
-        <div class="text-xs text-slate-500 mt-1">Espere até ficar <b>authenticated</b>.</div>
+        <div class="text-xs text-slate-500 mt-1">Espere até ficar <b>connected</b>.</div>
       </div>
 
       <div class="mt-6">
@@ -174,15 +168,15 @@
 
     function abrirModal(){ const m=document.getElementById('modal'); m.classList.remove('hidden'); m.classList.add('flex'); }
     function fecharModal(){ const m=document.getElementById('modal'); m.classList.add('hidden'); m.classList.remove('flex'); resetForm(); }
+
     const mId=document.getElementById('mId'),
           mNome=document.getElementById('mNome'),
           mLinha=document.getElementById('mLinha'),
-          mInstance=document.getElementById('mInstance'),
-          mToken=document.getElementById('mToken'),
+          mSid=document.getElementById('mSid'),
           mHook=document.getElementById('mHook');
 
     function resetForm(){
-      mId.value=''; mNome.value=''; mLinha.value=''; mInstance.value=''; mToken.value=''; mHook.value='<?= esc($webhookBase) ?>';
+      mId.value=''; mNome.value=''; mLinha.value=''; mSid.value=''; mHook.value='<?= esc($webhookBase) ?>';
     }
 
     document.getElementById('btnNovo').addEventListener('click', ()=>{
@@ -195,8 +189,7 @@
       mId.value=item.id;
       mNome.value=item.nome || 'Instância';
       mLinha.value=item.linha_msisdn || '';
-      mInstance.value=item.instance_id || '';
-      mToken.value=''; // em branco = manter
+      mSid.value=item.sid || item.instance_id || '';
       mHook.value=item.webhook_url || '<?= esc($webhookBase) ?>';
       abrirModal();
     }
@@ -208,8 +201,7 @@
       fd.append('id', mId.value || 0);
       fd.append('nome', mNome.value);
       fd.append('linha_msisdn', (mLinha.value || '').replace(/\D+/g,''));
-      fd.append('instance_id', mInstance.value);
-      fd.append('token', mToken.value || ''); // vazio no editar = manter token
+      fd.append('sid', (mSid.value || '').trim());
 
       const r  = await fetch('/whatsapp/bind', { method:'POST', body:fd });
       const j1 = await r.json();
@@ -257,15 +249,8 @@
     }
 
     function extractStatus(j) {
-      let st = j && j.status ? j.status : null;
-      let sub = null;
-      const raw = j && j.raw ? j.raw : null;
-      if (!st && raw && raw.status && raw.status.accountStatus && raw.status.accountStatus.status) {
-        st = raw.status.accountStatus.status;
-      }
-      if (raw && raw.status && raw.status.accountStatus && raw.status.accountStatus.substatus) {
-        sub = raw.status.accountStatus.substatus;
-      }
+      const st  = j && j.status ? j.status : null;
+      const sub = j && j.raw && j.raw.substatus ? j.raw.substatus : (j.substatus || null);
       return { st, sub };
     }
 
@@ -284,7 +269,7 @@
           const txt = st ? (sub ? `${st} / ${sub}` : st) : (j.status || 'unknown');
           document.getElementById('qrStatus').textContent = txt;
 
-          if (st === 'authenticated') {
+          if (st === 'authenticated' || st === 'connected') {
             setQrOk(true);
             if (pollTimer) clearTimeout(pollTimer);
             closeTimer = setTimeout(()=>{
@@ -306,9 +291,12 @@
       };
       document.getElementById('btnForce').onclick = async ()=>{
         const fd=new FormData(); fd.append(csrfName, csrfHash);
-        await fetch('/whatsapp/logout/'+id, { method:'POST', body:fd });
+        await fetch('/whatsapp/reset/'+id, { method:'POST', body:fd });
         setQrOk(false);
-        document.getElementById('qrImg').src = '/whatsapp/qr/'+id+'?ts='+Date.now();
+        // aguarda 1s e tenta novo QR
+        setTimeout(()=>{
+          document.getElementById('qrImg').src = '/whatsapp/qr/'+id+'?ts='+Date.now();
+        }, 1000);
       };
       document.getElementById('btnSaveHook').onclick = async ()=>{
         const fd=new FormData(); fd.append(csrfName, csrfHash);

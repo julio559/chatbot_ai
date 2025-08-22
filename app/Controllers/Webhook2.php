@@ -2,35 +2,44 @@
 
 namespace App\Controllers;
 
-use App\Models\{SessaoModel, OpenrouterModel, PacienteModel};
+use App\Models\SessaoModel;
+use App\Models\OpenrouterModel;
+use App\Models\PacienteModel;
 use CodeIgniter\RESTful\ResourceController;
 
-class Webhook extends ResourceController
+class Webhook2 extends ResourceController
 {
-    /* ====================== Utils ====================== */
+    /* ====================== Utilidades ====================== */
 
-    /** Mantém só dígitos. */
-    private function soDigitos(?string $v): string
+    /** Mantém apenas dígitos. */
+    private function soDigitos(?string $valor): string
     {
-        return preg_replace('/\D+/', '', (string) $v);
+        return preg_replace('/\D+/', '', (string) $valor);
     }
 
-    /**
-     * UltraMSG:
-     * - fromMe=false (lead => nós):  lead=data.from   | nossa linha=data.to
-     * - fromMe=true  (nós   => lead): lead=data.to    | nossa linha=data.from
-     */
-    private function extrairNumerosDoEvento(array $data): array
+    /** Normaliza texto. */
+    private function normalizarTexto(string $s): string
     {
-        $ehNossoEnvio = !empty($data['fromMe']);
-        $pacienteRaw  = $ehNossoEnvio ? ($data['to'] ?? '')   : ($data['from'] ?? '');
-        $nossoRaw     = $ehNossoEnvio ? ($data['from'] ?? '') : ($data['to']   ?? '');
-        $numeroLead   = $this->soDigitos(explode('@', (string)$pacienteRaw)[0] ?? '');
-        $nossoNumero  = $this->soDigitos(explode('@', (string)$nossoRaw)[0]     ?? '');
-        return [$ehNossoEnvio, $numeroLead, $nossoNumero];
+        $s = preg_replace('/\s+/u', ' ', trim($s));
+        $ascii = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $s);
+        if ($ascii !== false) {
+            $s = $ascii;
+        }
+        return mb_strtolower($s, 'UTF-8');
     }
 
-    /** Row da instância (se existir) pela linha (msisdn). */
+    /** Extrai primeiro nome a partir do nome completo. */
+    private function primeiroNome(?string $nome): string
+    {
+        $nome = trim((string) $nome);
+        if ($nome === '') {
+            return '';
+        }
+        $partes = preg_split('/\s+/', $nome);
+        return trim((string) ($partes[0] ?? ''));
+    }
+
+    /** Retorna a linha da instância (se existir) pelo msisdn. */
     private function obterInstanciaDaLinha(string $nossoNumero): ?array
     {
         $db = \Config\Database::connect();
@@ -40,235 +49,84 @@ class Webhook extends ResourceController
             ->limit(1)->get()->getRowArray() ?: null;
     }
 
-    /** Resolve dono priorizando a instância; fallback por telefone do usuário. */
+    /** Resolve o dono priorizando a instância; fallback pelo telefone do usuário. */
     private function encontrarDonoPorInstanciaOuLinha(string $nossoNumero): array
     {
         $db = \Config\Database::connect();
 
-        // via instância
+        // Pela instância (linha_msisdn)
         $inst = $this->obterInstanciaDaLinha($nossoNumero);
         if ($inst && !empty($inst['usuario_id'])) {
             $u = $db->table('usuarios')->select('id, assinante_id')
-                ->where('id', (int)$inst['usuario_id'])->get()->getRowArray();
-            if ($u) return [(int)$u['id'], (int)$u['assinante_id']];
+                ->where('id', (int) $inst['usuario_id'])->get()->getRowArray();
+            if ($u) {
+                return [(int) $u['id'], (int) $u['assinante_id']];
+            }
         }
 
-        // exato
+        // Telefone exato
         $u = $db->table('usuarios')->where('telefone_principal', $nossoNumero)->get()->getRowArray();
-        if ($u) return [(int)$u['id'], (int)$u['assinante_id']];
+        if ($u) {
+            return [(int) $u['id'], (int) $u['assinante_id']];
+        }
 
-        // sufixo
+        // Sufixo
         $len = strlen($nossoNumero);
         for ($take = 11; $take >= 8; $take--) {
-            if ($len < $take) continue;
+            if ($len < $take) {
+                continue;
+            }
             $suf = substr($nossoNumero, -$take);
             $u = $db->query(
                 "SELECT id, assinante_id
-                   FROM usuarios
-                  WHERE telefone_principal LIKE CONCAT('%', ?)
-               ORDER BY LENGTH(telefone_principal) DESC
-                  LIMIT 1",
+                 FROM usuarios
+                 WHERE telefone_principal LIKE CONCAT('%', ?)
+                 ORDER BY LENGTH(telefone_principal) DESC
+                 LIMIT 1",
                 [$suf]
             )->getRowArray();
-            if ($u) return [(int)$u['id'], (int)$u['assinante_id']];
+            if ($u) {
+                return [(int) $u['id'], (int) $u['assinante_id']];
+            }
         }
 
         return [null, null];
     }
 
-    /** Credenciais por MSISDN (preferindo a linha exata). */
-    private function pegarCredenciaisUltra(int $usuarioId, string $nossoNumero): ?array
+    /**
+     * Verifica se o número pertence a alguma instância do usuário (evita eco).
+     * Confere por igualdade e por sufixo de oito a onze dígitos.
+     */
+    private function ehNumeroDeInstanciaDoUsuario(int $usuarioId, string $numero): bool
     {
         $db  = \Config\Database::connect();
-        $num = $this->soDigitos($nossoNumero);
+        $num = $this->soDigitos($numero);
+        if ($num === '') return false;
 
-        // exato
+        // Igualdade
         $q = $db->table('whatsapp_instancias')
             ->where('usuario_id', $usuarioId)
             ->where('linha_msisdn', $num)
             ->limit(1)->get()->getRowArray();
-        if ($q) return ['instance_id' => $q['instance_id'], 'token' => $q['token']];
+        if ($q) return true;
 
-        // sufixo
+        // Sufixo
         $len = strlen($num);
         for ($take = 11; $take >= 8; $take--) {
             if ($len < $take) continue;
             $suf = substr($num, -$take);
             $q = $db->query(
-                "SELECT instance_id, token
-                   FROM whatsapp_instancias
-                  WHERE usuario_id = ?
-                    AND linha_msisdn LIKE CONCAT('%', ?)
-               ORDER BY LENGTH(linha_msisdn) DESC
-                  LIMIT 1",
+                "SELECT id FROM whatsapp_instancias
+                 WHERE usuario_id = ? AND linha_msisdn LIKE CONCAT('%', ?)
+                 LIMIT 1",
                 [$usuarioId, $suf]
             )->getRowArray();
-        if ($q) return ['instance_id' => $q['instance_id'], 'token' => $q['token']];
+            if ($q) return true;
         }
-
-        // última autenticada
-        $q = $db->table('whatsapp_instancias')
-            ->where('usuario_id', $usuarioId)
-            ->where('conn_status', 'authenticated')
-            ->orderBy('last_status_at', 'DESC')
-            ->limit(1)->get()->getRowArray();
-        if ($q) return ['instance_id' => $q['instance_id'], 'token' => $q['token']];
-
-        return null;
+        return false;
     }
 
-    /** Credenciais por TOKEN (útil quando etapa define token preferido). */
-    private function pegarCredenciaisPorToken(string $token): ?array
-    {
-        $db = \Config\Database::connect();
-        $q = $db->table('whatsapp_instancias')
-            ->select('instance_id, token')
-            ->where('token', $token)
-            ->orderBy('id', 'DESC')
-            ->limit(1)->get()->getRowArray();
-        return $q ? ['instance_id' => $q['instance_id'], 'token' => $q['token']] : null;
-    }
-
-/** Busca a instância pelo token, inclusive linha_msisdn, para coerência de linha. */
-private function pegarInstanciaPorToken(string $token): ?array
-{
-    $db = \Config\Database::connect();
-    return $db->table('whatsapp_instancias')
-        ->where('token', $token)
-        ->orderBy('id', 'DESC')
-        ->limit(1)->get()->getRowArray() ?: null;
-}
-
-
-    /**
-     * Envio via UltraMSG.
-     * - Se $tokenPreferido vier, usa a instância vinculada a esse token.
-     * - Caso contrário, resolve pela linha ($linhaEnvioMsisdn).
-     */
-    private function enviarParaWhatsapp(int $usuarioId, string $linhaEnvioMsisdn, string $numeroDestino, string $mensagem, ?string $tokenPreferido=null): bool
-    {
-        $creds = null;
-        if ($tokenPreferido) {
-            $creds = $this->pegarCredenciaisPorToken($tokenPreferido);
-            if (!$creds) {
-                log_message('error', "Token preferido sem instância. token={$tokenPreferido}");
-            }
-        }
-        if (!$creds) {
-            $creds = $this->pegarCredenciaisUltra($usuarioId, $linhaEnvioMsisdn);
-        }
-        if (!$creds) {
-            log_message('error', "Sem credenciais UltraMSG (user={$usuarioId}, linha={$linhaEnvioMsisdn})");
-            return false;
-        }
-
-        $instanceId = $creds['instance_id'];
-        $token      = $creds['token'];
-        $url        = "https://api.ultramsg.com/{$instanceId}/messages/chat";
-
-        $data = ['token' => $token, 'to' => $numeroDestino, 'body' => $mensagem];
-
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER     => ['Content-Type: application/x-www-form-urlencoded'],
-            CURLOPT_POST           => true,
-            CURLOPT_POSTFIELDS     => http_build_query($data),
-            CURLOPT_TIMEOUT        => 20,
-        ]);
-
-        $result   = curl_exec($ch);
-        $error    = curl_error($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        log_message('error', "Envio WhatsApp ({$numeroDestino}) via {$instanceId}: HTTP {$httpCode} - {$result}");
-        if ($error) log_message('error', "Erro cURL: " . $error);
-
-        return $httpCode >= 200 && $httpCode < 300;
-    }
-
-    /** Log no feed do chat. */
-    private function salvarMensagemChat(string $numero, string $role, string $texto, ?string $canal = 'whatsapp', ?int $usuarioId = null): void
-    {
-        $db = \Config\Database::connect();
-        $db->table('chat_mensagens')->insert([
-            'numero'     => $numero,
-            'role'       => $role,   // 'user' | 'assistant' | 'humano'
-            'canal'      => $canal ?: 'whatsapp',
-            'usuario_id' => $usuarioId,
-            'texto'      => $texto,
-            'created_at' => date('Y-m-d H:i:s'),
-        ]);
-    }
-
-    /** Último role no feed do chat para (usuario, numero). */
-    private function pegarUltimoRoleChat(int $usuarioId, string $numero): ?string
-    {
-        $db = \Config\Database::connect();
-        $row = $db->table('chat_mensagens')
-            ->select('role')
-            ->where('usuario_id', $usuarioId)
-            ->where('numero', $numero)
-            ->orderBy('id', 'DESC')
-            ->limit(1)->get()->getRowArray();
-        return $row['role'] ?? null;
-    }
-
-    /** Idempotência por (instância, provider_id). */
-    private function registrarIdempotencia(?string $providerId, string $instanciaKey): bool
-    {
-        if (!$providerId) return true;
-        $db = \Config\Database::connect();
-
-        try {
-            $db->query(
-                "INSERT IGNORE INTO webhook_msgs (instancia_key, provider_msg_id, created_at)
-                 VALUES (?, ?, NOW())",
-                [$instanciaKey, $providerId]
-            );
-            return $db->affectedRows() > 0;
-        } catch (\Throwable $e1) {
-            log_message('error', 'Idempotência por instância indisponível. Fallback: ' . $e1->getMessage());
-            try {
-                $db->query(
-                    "INSERT IGNORE INTO webhook_msgs (provider_msg_id, created_at)
-                     VALUES (?, NOW())",
-                    [$providerId]
-                );
-                return $db->affectedRows() > 0;
-            } catch (\Throwable $e2) {
-                log_message('error', 'Idempotência falhou: ' . $e2->getMessage());
-                return true;
-            }
-        }
-    }
-
-    /** Garante sessoes.canal preenchido. */
-    private function garantirCanalSessao(string $numero, int $usuarioId, string $canal = 'whatsapp'): void
-    {
-        $db = \Config\Database::connect();
-        $db->query(
-            "UPDATE sessoes
-                SET canal = IFNULL(canal, ?)
-              WHERE numero = ? AND usuario_id = ?",
-            [$canal, $numero, $usuarioId]
-        );
-    }
-
-    /* ======== Helpers de etapa/instância ======== */
-
-    /** Pega config da etapa (assinante+etapa) do config_ia. */
-    private function obterConfigEtapa(int $assinanteId, string $etapa): ?array
-    {
-        $db = \Config\Database::connect();
-        return $db->table('config_ia')
-            ->where('assinante_id', $assinanteId)
-            ->where('etapa_atual', $etapa)
-            ->limit(1)->get()->getRowArray() ?: null;
-    }
-
-    /** Retorna msisdn da N-ésima instância autenticada do usuário (1-based). */
+    /** N-ésima instância autenticada do usuário (índice iniciando em um). */
     private function pickNthInstanceMsisdn(int $usuarioId, int $ordem): ?string
     {
         if ($ordem <= 0) return null;
@@ -283,136 +141,616 @@ private function pegarInstanciaPorToken(string $token): ?array
         return isset($rows[$idx]['linha_msisdn']) ? $this->soDigitos($rows[$idx]['linha_msisdn']) : null;
     }
 
-    /**
-     * Decide canal de envio:
-     * 1) token preferido da etapa (instancia_preferida_token)
-     * 2) msisdn preferido (instancia_preferida_msisdn)
-     * 3) mesma linha que recebeu
-     *
-     * Retorna [tokenPreferido|null, msisdnParaEnvio]
-     */
-  /**
- * Decide canal de envio (com coerência de linha):
- * - Se a etapa tem token preferido -> só usa se a instância desse token tiver a MESMA linha que recebeu.
- * - Se a etapa tem msisdn preferido -> só usa se for EXATAMENTE a MESMA linha que recebeu.
- * - Se tem "ordem" -> só usa se resolver na MESMA linha (na prática, quase sempre será ignorado).
- * - Caso contrário, SEMPRE responde pela MESMA linha que recebeu.
- *
- * Retorna [tokenPreferido|null, msisdnParaEnvio] — msisdnParaEnvio será sempre a linha que recebeu.
- */
-private function escolherCanalEnvio(int $usuarioId, string $linhaRecebida, ?array $cfgEtapa): array
-{
-    $linhaRx = $this->soDigitos($linhaRecebida);
+    /** Decide canal de envio mantendo coerência da linha. */
+    private function escolherCanalEnvio(int $usuarioId, string $linhaRecebida, ?array $cfgEtapa): array
+    {
+        $linhaRx = $this->soDigitos($linhaRecebida);
 
-    // 1) token preferido: só aceita se token pertencer à MESMA linha
-    $tokenPref = trim((string)($cfgEtapa['instancia_preferida_token'] ?? ''));
-    if ($tokenPref !== '') {
-        $inst = $this->pegarInstanciaPorToken($tokenPref);
-        if ($inst) {
-            $linhaDoToken = $this->soDigitos((string)($inst['linha_msisdn'] ?? ''));
-            if ($linhaDoToken !== '' && $linhaDoToken === $linhaRx) {
-                // ok: mesmo número
-                return [$tokenPref, $linhaRecebida];
+        // Token preferido (mesma linha)
+        $tokenPref = trim((string) ($cfgEtapa['instancia_preferida_token'] ?? ''));
+        if ($tokenPref !== '') {
+            $inst = $this->pegarInstanciaPorToken($tokenPref);
+            if ($inst) {
+                $linhaDoToken = $this->soDigitos((string) ($inst['linha_msisdn'] ?? ''));
+                if ($linhaDoToken !== '' && $linhaDoToken === $linhaRx) {
+                    return [$tokenPref, $linhaRecebida];
+                }
             }
-            // não é a mesma linha → ignorar token preferido
-            log_message('debug', 'Coerência de linha: token preferido ignorado (linha diferente).');
         }
-    }
 
-    // 2) msisdn preferido: só aceita se for EXATAMENTE a mesma linha
-    $preferMsisdn = $this->soDigitos($cfgEtapa['instancia_preferida_msisdn'] ?? '');
-    if ($preferMsisdn !== '' && $preferMsisdn === $linhaRx) {
+        // Número preferido (mesma linha)
+        $preferMsisdn = $this->soDigitos($cfgEtapa['instancia_preferida_msisdn'] ?? '');
+        if ($preferMsisdn !== '' && $preferMsisdn === $linhaRx) {
+            return [null, $linhaRecebida];
+        }
+
+        // Enésima instância (mesma linha)
+        $preferOrdem = (int) ($cfgEtapa['instancia_preferida_ordem'] ?? 0);
+        if ($preferOrdem > 0) {
+            $nMsisdn = $this->pickNthInstanceMsisdn($usuarioId, $preferOrdem);
+            if ($nMsisdn && $this->soDigitos($nMsisdn) === $linhaRx) {
+                return [null, $linhaRecebida];
+            }
+        }
+
         return [null, $linhaRecebida];
     }
 
-    // 3) ordem N-ésima (opcional): só se resolver para a MESMA linha
-    $preferOrdem = (int)($cfgEtapa['instancia_preferida_ordem'] ?? 0);
-    if ($preferOrdem > 0) {
-        $nMsisdn = $this->pickNthInstanceMsisdn($usuarioId, $preferOrdem);
-        if ($nMsisdn && $this->soDigitos($nMsisdn) === $linhaRx) {
-            return [null, $linhaRecebida];
-        }
-        log_message('debug', 'Coerência de linha: ordem preferida ignorada (linha diferente).');
+    /** Credenciais por token (linha atrelada a um access token). */
+    private function pegarCredenciaisPorToken(string $token): ?array
+    {
+        $db = \Config\Database::connect();
+        $q = $db->table('whatsapp_instancias')
+            ->select('instance_id, token')
+            ->where('token', $token)
+            ->orderBy('id', 'DESC')
+            ->limit(1)->get()->getRowArray();
+        return $q ? ['instance_id' => $q['instance_id'], 'token' => $q['token']] : null;
     }
 
-    // 4) fallback: sempre responder pela MESMA linha que recebeu
-    return [null, $linhaRecebida];
-}
+    /** Retorna a instância a partir do token. */
+    private function pegarInstanciaPorToken(string $token): ?array
+    {
+        $db = \Config\Database::connect();
+        return $db->table('whatsapp_instancias')
+            ->where('token', $token)
+            ->orderBy('id', 'DESC')
+            ->limit(1)->get()->getRowArray() ?: null;
+    }
 
+    /**
+     * Credenciais da **Meta** por número da linha (display_phone_number),
+     * preferindo igualdade depois sufixo; `instance_id` = phone_number_id.
+     */
+    private function pegarCredenciaisMeta(int $usuarioId, string $nossoNumero): ?array
+    {
+        $db  = \Config\Database::connect();
+        $num = $this->soDigitos($nossoNumero);
+
+        // Igualdade
+        $q = $db->table('whatsapp_instancias')
+            ->where('usuario_id', $usuarioId)
+            ->where('linha_msisdn', $num)
+            ->limit(1)->get()->getRowArray();
+        if ($q) {
+            return ['instance_id' => $q['instance_id'], 'token' => $q['token']];
+        }
+
+        // Sufixo
+        $len = strlen($num);
+        for ($take = 11; $take >= 8; $take--) {
+            if ($len < $take) continue;
+            $suf = substr($num, -$take);
+            $q = $db->query(
+                "SELECT instance_id, token
+                 FROM whatsapp_instancias
+                 WHERE usuario_id = ?
+                   AND linha_msisdn LIKE CONCAT('%', ?)
+                 ORDER BY LENGTH(linha_msisdn) DESC
+                 LIMIT 1",
+                [$usuarioId, $suf]
+            )->getRowArray();
+            if ($q) {
+                return ['instance_id' => $q['instance_id'], 'token' => $q['token']];
+            }
+        }
+
+        // Última autenticada
+        $q = $db->table('whatsapp_instancias')
+            ->where('usuario_id', $usuarioId)
+            ->where('conn_status', 'authenticated')
+            ->orderBy('last_status_at', 'DESC')
+            ->limit(1)->get()->getRowArray();
+        if ($q) {
+            return ['instance_id' => $q['instance_id'], 'token' => $q['token']];
+        }
+
+        return null;
+    }
+
+    /** Envia mensagem via **WhatsApp Cloud API**. */
+    private function enviarParaWhatsapp(int $usuarioId, string $linhaEnvioMsisdn, string $numeroDestino, string $mensagem, ?string $tokenPreferido = null): bool
+    {
+        // 1) Descobrir credenciais (phone_number_id + access_token)
+        $creds = null;
+        if ($tokenPreferido) {
+            $creds = $this->pegarCredenciaisPorToken($tokenPreferido);
+            if (!$creds) {
+                log_message('error', "Token preferido sem instância. token={$tokenPreferido}");
+            }
+        }
+        if (!$creds) {
+            $creds = $this->pegarCredenciaisMeta($usuarioId, $linhaEnvioMsisdn);
+        }
+        if (!$creds) {
+            log_message('error', "Sem credenciais Meta (usuario={$usuarioId}, linha={$linhaEnvioMsisdn})");
+            return false;
+        }
+
+        $phoneNumberId = $creds['instance_id']; // <- phone_number_id
+        $accessToken   = $creds['token'];
+
+        $url  = "https://graph.facebook.com/v20.0/{$phoneNumberId}/messages";
+        $body = [
+            'messaging_product' => 'whatsapp',
+            'to'                => $this->soDigitos($numeroDestino),
+            'type'              => 'text',
+            'text'              => ['preview_url' => false, 'body' => $mensagem],
+        ];
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER     => [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . $accessToken,
+            ],
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => json_encode($body, JSON_UNESCAPED_UNICODE),
+            CURLOPT_TIMEOUT        => 25,
+        ]);
+
+        $result   = curl_exec($ch);
+        $error    = curl_error($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        log_message('error', "Envio WhatsApp META ({$numeroDestino}) via {$phoneNumberId}: HTTP {$httpCode} - {$result}");
+        if ($error) {
+            log_message('error', "Erro cURL: " . $error);
+        }
+
+        return $httpCode >= 200 && $httpCode < 300;
+    }
+
+    /** Garante o preenchimento de sessoes.canal. */
+    private function garantirCanalSessao(string $numero, int $usuarioId, string $canal = 'whatsapp'): void
+    {
+        $db = \Config\Database::connect();
+        $db->query(
+            "UPDATE sessoes
+             SET canal = IFNULL(canal, ?)
+             WHERE numero = ? AND usuario_id = ?",
+            [$canal, $numero, $usuarioId]
+        );
+    }
+
+    /** Atualiza a etapa da sessão de forma consistente. */
+    private function moverSessaoParaEtapa(
+        SessaoModel $sessaoModel,
+        string $numero,
+        int $usuarioId,
+        string $novaEtapa,
+        array $camposExtras = []
+    ): void {
+        $payload = array_merge([
+            'etapa'            => $novaEtapa,
+            'etapa_changed_at' => date('Y-m-d H:i:s'),
+            'data_atualizacao' => date('Y-m-d H:i:s'),
+        ], $camposExtras);
+
+        $sessaoModel->where('numero', $numero)
+            ->where('usuario_id', $usuarioId)
+            ->set($payload)
+            ->update();
+    }
+
+    /** Idempotência por instância e mensagem do provedor. */
+    private function registrarIdempotencia(?string $providerId, string $instanciaKey): bool
+    {
+        if (!$providerId) return true;
+        $db = \Config\Database::connect();
+
+        try {
+            $db->query(
+                "INSERT IGNORE INTO webhook_msgs (instancia_key, provider_msg_id, created_at)
+                 VALUES (?, ?, NOW())",
+                [$instanciaKey, $providerId]
+            );
+            return $db->affectedRows() > 0;
+        } catch (\Throwable $e1) {
+            try {
+                $db->query(
+                    "INSERT IGNORE INTO webhook_msgs (provider_msg_id, created_at)
+                     VALUES (?, NOW())",
+                    [$providerId]
+                );
+                return $db->affectedRows() > 0;
+            } catch (\Throwable $e2) {
+                return true;
+            }
+        }
+    }
+
+    /** Último papel no feed do chat, com filtro opcional de canal. */
+    private function pegarUltimoRoleChat(int $usuarioId, string $numero, ?string $canalExato = null): ?string
+    {
+        $db = \Config\Database::connect();
+        $builder = $db->table('chat_mensagens')
+            ->select('role')
+            ->where('usuario_id', $usuarioId)
+            ->where('numero', $numero);
+
+        if ($canalExato !== null && $canalExato !== '') {
+            $builder->where('canal', $canalExato);
+        }
+
+        $row = $builder->orderBy('id', 'DESC')->limit(1)->get()->getRowArray();
+        return $row['role'] ?? null;
+    }
+
+    /** Verdadeiro se houve mensagem de humano dentro da janela. */
+    private function humanoMandouRecentemente(int $usuarioId, string $numero, ?string $canalExato = null, int $segundos = 120): bool
+    {
+        $db = \Config\Database::connect();
+        $builder = $db->table('chat_mensagens')
+            ->select('created_at')
+            ->where('usuario_id', $usuarioId)
+            ->where('numero', $numero)
+            ->where('role', 'humano');
+
+        if ($canalExato !== null && $canalExato !== '') {
+            $builder->where('canal', $canalExato);
+        }
+
+        $row = $builder->orderBy('id', 'DESC')->limit(1)->get()->getRowArray();
+        if (!$row || empty($row['created_at'])) {
+            return false;
+        }
+
+        $ts = strtotime((string) $row['created_at']);
+        return $ts && (time() - $ts) <= $segundos;
+    }
+
+    /** Salva mensagem no feed do chat. */
+    private function salvarMensagemChat(string $numero, string $role, string $texto, ?string $canal = 'whatsapp', ?int $usuarioId = null): void
+    {
+        $db = \Config\Database::connect();
+        $db->table('chat_mensagens')->insert([
+            'numero'     => $numero,
+            'role'       => $role,
+            'canal'      => $canal ?: 'whatsapp',
+            'usuario_id' => $usuarioId,
+            'texto'      => $texto,
+            'created_at' => date('Y-m-d H:i:s'),
+        ]);
+    }
+
+    /* ================== Lote de quinze segundos: cache e trava ================== */
+
+    private function batchCacheKey(int $usuarioId, string $linha, string $numero): string
+    {
+        return "ia_batch_{$usuarioId}_{$linha}_{$numero}";
+    }
+
+    private function lockName(int $usuarioId, string $linha, string $numero): string
+    {
+        $name = "ia:{$usuarioId}:{$linha}:{$numero}";
+        return substr($name, 0, 64);
+    }
+
+    private function acquireWorkerLock(string $name): bool
+    {
+        $db  = \Config\Database::connect();
+        $row = $db->query("SELECT GET_LOCK(?, 0) AS l", [$name])->getRowArray();
+        return isset($row['l']) && (int) $row['l'] === 1;
+    }
+
+    private function releaseWorkerLock(string $name): void
+    {
+        try {
+            $db = \Config\Database::connect();
+            $db->query("SELECT RELEASE_LOCK(?)", [$name]);
+        } catch (\Throwable $e) {
+            // Ignorar
+        }
+    }
+
+    private function appendBatchMessage($cache, string $key, string $texto): array
+    {
+        $raw     = (string) ($cache->get($key) ?? '');
+        $payload = json_decode($raw, true);
+        if (!is_array($payload)) {
+            $payload = ['text' => '', 'first_at' => time(), 'last_at' => 0];
+        }
+
+        $texto = trim($texto);
+        if ($texto !== '') {
+            $payload['text'] = ($payload['text'] !== '' ? ($payload['text'] . "\n") : '') . $texto;
+        }
+        $payload['last_at'] = time();
+
+        // Tempo de vida de quinze minutos
+        $cache->save($key, json_encode($payload, JSON_UNESCAPED_UNICODE), 900);
+        return $payload;
+    }
+
+    private function lerBatch($cache, string $key): array
+    {
+        $raw     = (string) ($cache->get($key) ?? '');
+        $payload = json_decode($raw, true);
+        if (!is_array($payload)) {
+            $payload = ['text' => '', 'first_at' => time(), 'last_at' => 0];
+        }
+        return $payload;
+    }
+
+    private function limparBatch($cache, string $key): void
+    {
+        $cache->delete($key);
+    }
+
+    /** Detecta mensagem sem intenção (saudação ou ruído curto) no primeiro contato. */
+    private function mensagemSemIntent(string $texto): bool
+    {
+        $t = $this->normalizarTexto($texto);
+        if ($t === '') return true;
+
+        // Muito curta
+        if (mb_strlen($t, 'UTF-8') <= 2) return true;
+
+        // Sem letras (apenas emojis/pontuação)
+        if (!preg_match('/\p{L}/u', $t)) return true;
+
+        // Até 4 palavras e só cumprimentos comuns
+        $tlimpo = preg_replace('/[^\p{L}\p{N}\s\?]/u', '', $t);
+        $pal    = preg_split('/\s+/', trim((string) $tlimpo));
+        $qtd    = count(array_filter($pal, fn($p) => $p !== ''));
+        if ($qtd <= 4) {
+            $greetings = [
+                'oi','ola','olá','eai','e aí','ei','hey','hi','hello','salve',
+                'boa tarde','boa noite','bom dia','tudo bem','td bem','td bom',
+                'como vai','como vc está','como voce está','como você está',
+            ];
+            foreach ($greetings as $g) {
+                if (strpos($t, $g) !== false) return true;
+            }
+        }
+        return false;
+    }
+
+    /* ====================== Meta Webhook helpers ====================== */
+
+    /**
+     * Extrai, de um payload da Meta, os campos necessários.
+     * Retorna null se não houver "messages" (ex.: apenas "statuses").
+     */
+    private function extrairMetaMensagem(array $json): ?array
+    {
+        if (!isset($json['entry']) || !is_array($json['entry'])) {
+            return null;
+        }
+
+        foreach ($json['entry'] as $entry) {
+            if (!isset($entry['changes']) || !is_array($entry['changes'])) continue;
+
+            foreach ($entry['changes'] as $chg) {
+                if (!isset($chg['value']) || !is_array($chg['value'])) continue;
+
+                $val = $chg['value'];
+                $metadata = $val['metadata'] ?? [];
+                $phoneNumberId = (string) ($metadata['phone_number_id'] ?? '');
+                $displayPhone  = $this->soDigitos((string) ($metadata['display_phone_number'] ?? ''));
+
+                // Apenas mensagens (ignora statuses)
+                if (!empty($val['messages']) && is_array($val['messages'])) {
+                    $msg = $val['messages'][0];
+
+                    $from      = $this->soDigitos((string) ($msg['from'] ?? ''));
+                    $provider  = (string) ($msg['id'] ?? '');
+                    $pushname  = (string) ($val['contacts'][0]['profile']['name'] ?? ($val['contacts'][0]['wa_id'] ?? 'Paciente'));
+
+                    // Texto amigável (text / interactive)
+                    $texto = '';
+                    $type  = (string) ($msg['type'] ?? '');
+                    if ($type === 'text') {
+                        $texto = (string) ($msg['text']['body'] ?? '');
+                    } elseif ($type === 'interactive') {
+                        // button/text ou list_reply/title
+                        if (isset($msg['interactive']['button_reply']['title'])) {
+                            $texto = (string) $msg['interactive']['button_reply']['title'];
+                        } elseif (isset($msg['interactive']['list_reply']['title'])) {
+                            $texto = (string) $msg['interactive']['list_reply']['title'];
+                        } elseif (isset($msg['interactive']['type'])) {
+                            $texto = (string) $msg['interactive']['type'];
+                        }
+                    } elseif ($type !== '') {
+                        $texto = "[{$type}]";
+                    }
+
+                    return [
+                        'from'             => $from,
+                        'display_phone'    => $displayPhone,
+                        'phone_number_id'  => $phoneNumberId,
+                        'provider_id'      => $provider,
+                        'pushname'         => $pushname,
+                        'texto'            => $texto,
+                    ];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /** Nome e tratamento do profissional (Doutora ou Doutor). */
+    private function pegarProfissionalNomeTratamento(int $usuarioId): array
+    {
+        $db  = \Config\Database::connect();
+
+        $row = $db->table('usuarios')
+            ->where('id', $usuarioId)
+            ->limit(1)
+            ->get()
+            ->getRowArray() ?: [];
+
+        $nome    = trim((string)($row['nome'] ?? ''));
+        $genero  = strtoupper(trim((string)($row['genero'] ?? ($row['sexo'] ?? ''))));
+        $tratCfg = trim((string)($row['tratamento'] ?? ''));
+
+        if ($tratCfg !== '') {
+            $trat = $tratCfg;
+        } elseif ($genero === 'F') {
+            $trat = 'Dra.';
+        } elseif ($genero === 'M') {
+            $trat = 'Dr.';
+        } elseif ($nome !== '' && stripos($nome, 'dra') !== false) {
+            $trat = 'Dra.';
+        } else {
+            $trat = 'Dra./Dr.';
+        }
+
+        $primeiro = $nome !== '' ? preg_split('/\s+/', $nome)[0] : '';
+        return ['nome' => $primeiro ?: $nome, 'tratamento' => $trat];
+    }
+
+    /** Lista etapas válidas do usuário com fallbacks. */
+    private function listarEtapasValidas(int $usuarioId, int $assinanteId): array
+    {
+        $sessaoModel = new SessaoModel();
+        $validas = (array) $sessaoModel->listarEtapasUsuario($usuarioId);
+        $validas = array_values(array_unique(array_filter(array_map('strval', $validas), fn($v) => trim($v) !== '')));
+
+        if (!empty($validas)) return $validas;
+
+        // Fallback por configurações armazenadas
+        $db = \Config\Database::connect();
+        $rows = $db->table('config_ia')
+            ->select('etapa_atual')
+            ->where('assinante_id', $assinanteId)
+            ->groupBy('etapa_atual')
+            ->orderBy('etapa_atual', 'ASC')
+            ->get()->getResultArray();
+        $validas = array_values(array_unique(array_filter(array_map(fn($r) => (string) $r['etapa_atual'], $rows), fn($v) => trim($v) !== '')));
+
+        if (!empty($validas)) return $validas;
+
+        // Fallback final
+        return ['entrada', 'qualificacao', 'agendamento', 'pagamento', 'finalizado', 'humano'];
+    }
 
     /* ============================ Webhook ============================ */
-
     public function index()
     {
         helper('ia');
+        @set_time_limit(0);
 
+        // 1) Verificação do webhook (Meta)
+        if (strtolower($this->request->getMethod()) === 'get') {
+            $mode      = $this->request->getGet('hub_mode')      ?? $this->request->getGet('hub.mode');
+            $challenge = $this->request->getGet('hub_challenge') ?? $this->request->getGet('hub.challenge');
+            $verifyTok = $this->request->getGet('hub_verify_token') ?? $this->request->getGet('hub.verify_token');
+
+            if ($mode === 'subscribe' && $verifyTok && $verifyTok === (string) env('META_VERIFY_TOKEN')) {
+                return $this->response->setStatusCode(200)->setBody((string) $challenge);
+            }
+            return $this->response->setStatusCode(403)->setBody('verificacao falhou');
+        }
+
+        // 2) JSON do POST
         $json = $this->request->getJSON(true);
+        if (!$json) {
+            return $this->respond(['ignorado' => 'payload vazio'], 200);
+        }
+
+        /* --------- META Cloud API --------- */
+        $ehMeta = isset($json['object']) && $json['object'] === 'whatsapp_business_account';
+        if ($ehMeta) {
+            $meta = $this->extrairMetaMensagem($json);
+            if (!$meta) {
+                return $this->respond(['ignorado' => 'sem mensagens (provável status)'], 200);
+            }
+
+            // Números e instância
+            $ehNossoEnvio = false; // mensagens recebidas não vêm como "fromMe" pela Meta
+            $numero       = $meta['from'];                    // lead
+            $nossoNumero  = $meta['display_phone'];           // msisdn da linha (digits)
+            $mensagem     = trim((string) $meta['texto']);
+            $pushname     = (string) ($meta['pushname'] ?? 'Paciente');
+            $canalBase    = 'whatsapp';
+            $canalLinha   = $canalBase . ':' . $nossoNumero;
+
+            $instRow      = $this->obterInstanciaDaLinha($nossoNumero);
+            $instanciaKey = $meta['phone_number_id'] ?: ($instRow['instance_id'] ?? $nossoNumero);
+            $providerId   = $meta['provider_id'] ?? null;
+
+            if ($numero === '' || $nossoNumero === '' || $mensagem === '') {
+                return $this->respond(['ignorado' => 'dados incompletos'], 200);
+            }
+
+            // Idempotência
+            if (!$this->registrarIdempotencia(is_string($providerId) ? $providerId : null, $instanciaKey)) {
+                return $this->respond(['ignorado' => 'duplicado pela mesma instância'], 200);
+            }
+
+            // Dono
+            [$usuarioId, $assinanteId] = $this->encontrarDonoPorInstanciaOuLinha($nossoNumero);
+            if (!$usuarioId || !$assinanteId) {
+                return $this->respond(['ignorado' => 'linha não vinculada a usuário'], 200);
+            }
+            if ($instRow && (int) $instRow['usuario_id'] !== (int) $usuarioId) {
+                return $this->respond(['ignorado' => 'instância pertence a outro usuário'], 200);
+            }
+
+            // Continuação usa a mesma lógica já existente
+            return $this->processarEntrada($usuarioId, $assinanteId, $numero, $nossoNumero, $mensagem, $pushname, $canalBase, $canalLinha, $instanciaKey);
+        }
+
+        /* --------- (Opcional) legado UltraMSG ---------
+           Se ainda chegar payload antigo com "data", faz um ignore controlado. */
         if (!isset($json['data'])) {
-            return $this->respond(['ignorado' => 'payload inválido'], 200);
-        }
-        $data = $json['data'];
-
-        // --------- NÚMEROS / INSTÂNCIA ---------
-        [$ehNossoEnvio, $numero, $nossoNumero] = $this->extrairNumerosDoEvento($data);
-        $mensagem   = trim((string)($data['body'] ?? ''));
-        $pushname   = (string)($data['pushname'] ?? 'Paciente');
-        $canal      = 'whatsapp';
-
-        $instanceIdPayload = (string)($data['instanceId'] ?? $data['instance'] ?? '');
-        $instRow           = $this->obterInstanciaDaLinha($nossoNumero);
-        $instanciaKey      = $instRow['instance_id'] ?? ($instanceIdPayload ?: $nossoNumero);
-
-        if ($numero === '' || $nossoNumero === '' || $mensagem === '') {
-            return $this->respond(['ignorado' => 'dados incompletos'], 200);
+            return $this->respond(['ignorado' => 'payload não reconhecido'], 200);
         }
 
-        // --------- Idempotência ---------
-        $providerId = $data['id'] ?? ($data['messageId'] ?? ($data['message_id'] ?? null));
-        if (!$this->registrarIdempotencia(is_string($providerId) ? $providerId : null, $instanciaKey)) {
-            return $this->respond(['ignorado' => 'duplicado pela mesma instância'], 200);
-        }
+        // Se quiser, você pode remover tudo abaixo. Mantive um ignore "limpo".
+        return $this->respond(['ignorado' => 'evento não-meta (desativado)'], 200);
+    }
 
-        // --------- DONO ---------
-        [$usuarioId, $assinanteId] = $this->encontrarDonoPorInstanciaOuLinha($nossoNumero);
-        if (!$usuarioId || !$assinanteId) {
-            log_message('error', "Webhook: linha/instância sem dono (to={$nossoNumero})");
-            return $this->respond(['ignorado' => 'linha não vinculada a usuário'], 200);
-        }
-        if ($instRow && (int)$instRow['usuario_id'] !== (int)$usuarioId) {
-            return $this->respond(['ignorado' => 'instância pertence a outro usuário (duplicado)'], 200);
-        }
+    /* ============================ Núcleo do processamento ============================ */
 
-        // --------- Models / cache ---------
+
+public function verify()
+{
+    $mode      = $this->request->getGet('hub_mode')      ?? $this->request->getGet('hub.mode');
+    $token     = $this->request->getGet('hub_verify_token') ?? $this->request->getGet('hub.verify_token');
+    $challenge = $this->request->getGet('hub_challenge') ?? $this->request->getGet('hub.challenge');
+
+    $expected = env('META_VERIFY_TOKEN'); // do .env
+
+    if ($mode === 'subscribe' && $token && $expected && hash_equals((string)$expected, (string)$token)) {
+        return $this->response
+            ->setStatusCode(200)
+            ->setHeader('Content-Type', 'text/plain; charset=utf-8')
+            ->setBody((string) $challenge);
+    }
+    return $this->response->setStatusCode(403)->setBody('Forbidden');
+}
+
+
+
+    private function processarEntrada(
+        int $usuarioId,
+        int $assinanteId,
+        string $numero,
+        string $nossoNumero,
+        string $mensagem,
+        string $pushname,
+        string $canalBase,
+        string $canalLinha,
+        string $instanciaKey
+    ) {
+        // Modelos e cache
         $pacienteModel = new PacienteModel();
         $sessaoModel   = new SessaoModel();
         $cache         = \Config\Services::cache();
 
-        /* ===================== de nós -> lead (saída) ===================== */
-        if ($ehNossoEnvio) {
-            $sessao = $sessaoModel->getOuCriarSessao($numero, $usuarioId);
-            $ultimaRespostaIa = $sessao['ultima_resposta_ia'] ?? null;
-
-            // Se for eco da IA, marque como assistant e não mexa em nada
-            if ($ultimaRespostaIa && trim($ultimaRespostaIa) === $mensagem) {
-                $this->salvarMensagemChat($numero, 'assistant', $mensagem, $canal, $usuarioId);
-                return $this->respond(['ignorado' => 'eco da própria IA (registrado no chat)'], 200);
-            }
-
-            // Qualquer outra mensagem nossa é HUMANA => travar IA
-            $sessaoModel->where('numero', $numero)->where('usuario_id', $usuarioId)
-                ->set([
-                    'etapa'                   => 'humano',   // trava a IA até mudarem manualmente
-                    'ultima_resposta_ia'      => null,
-                    // mantém historico/ultima_mensagem_usuario conforme fluxo de entrada
-                ])->update();
-
-            $this->salvarMensagemChat($numero, 'humano', $mensagem, $canal, $usuarioId);
-            return $this->respond(['ok' => 'humano assumiu; IA pausada até mudarem a etapa'], 200);
+        // Não criar paciente se o número é de alguma instância do usuário
+        if ($this->ehNumeroDeInstanciaDoUsuario($usuarioId, $numero)) {
+            $this->salvarMensagemChat($numero, 'user', $mensagem, $canalLinha, $usuarioId);
+            return $this->respond(['ignorado' => 'mensagem da própria linha ou instância'], 200);
         }
 
-        /* ===================== lead -> nós (entrada) ===================== */
-
-        // Upsert Paciente (escopo do usuário)
+        // Paciente no escopo do usuário (inserção/atualização)
         $paciente = $pacienteModel->where('telefone', $numero)->where('usuario_id', $usuarioId)->first();
         if ($paciente) {
             $pacienteModel->update($paciente['id'], ['ultimo_contato' => date('Y-m-d H:i:s')]);
@@ -427,255 +765,284 @@ private function escolherCanalEnvio(int $usuarioId, string $linhaRecebida, ?arra
             $paciente = $pacienteModel->where('telefone', $numero)->where('usuario_id', $usuarioId)->first();
         }
 
-        // >>> Captura o último role ANTES de registrar a mensagem do paciente
-        $ultimoRoleAntes = $this->pegarUltimoRoleChat($usuarioId, $numero);
+        // Log de entrada do paciente
+        $this->salvarMensagemChat($numero, 'user', $mensagem, $canalLinha, $usuarioId);
 
-        // loga entrada do paciente
-        $this->salvarMensagemChat($numero, 'user', $mensagem, $canal, $usuarioId);
+        // Sessão única por par usuário e número
+        $sessao     = $sessaoModel->getOuCriarSessao($numero, $usuarioId);
+        $etapaAtual = $sessao['etapa'] ?? 'entrada';
 
-        // aprende nome simples
-        if (preg_match('/\b(meu\s+nome\s+é|meu\s+nome\s+e|sou|eu\s+me\s+chamo)\s+(.{2,60})/i', $mensagem, $m)) {
-            $possivelNome = trim(preg_replace('/[^\p{L}\p{M}\s\'.-]/u', '', $m[2]));
-            if ($possivelNome && mb_strlen($possivelNome, 'UTF-8') >= 2) {
-                $pacienteModel->update($paciente['id'], ['nome' => $possivelNome]);
-            }
+        // Garantir canal
+        $this->garantirCanalSessao($numero, $usuarioId, $canalBase);
+
+        // Agrupamento de quinze segundos
+        $batchKey = $this->batchCacheKey($usuarioId, $nossoNumero, $numero);
+        $this->appendBatchMessage(\Config\Services::cache(), $batchKey, $mensagem);
+
+        $lockName  = $this->lockName($usuarioId, $nossoNumero, $numero);
+        $souWorker = $this->acquireWorkerLock($lockName);
+        if (!$souWorker) {
+            return $this->respond(['ok' => 'em espera para agrupar'], 200);
         }
-
-        // Sessão
-        $sessao            = $sessaoModel->getOuCriarSessao($numero, $usuarioId);
-        $etapaAtual        = $sessao['etapa'] ?? 'inicio';
-        $ultimaMsgUsuario  = $sessao['ultima_mensagem_usuario'] ?? null;
-        $tsAtualizacao     = !empty($sessao['data_atualizacao']) ? strtotime($sessao['data_atualizacao']) : 0;
-
-        // garante canal
-        $this->garantirCanalSessao($numero, $usuarioId, $canal);
-
-        // anti-dup/cooldown
-        $tempoAtual       = time();
-        $janelaDuplicata  = 15;
-        $cooldownResposta = 6;
-
-        if (!empty($ultimaMsgUsuario)
-            && mb_strtolower(trim($ultimaMsgUsuario), 'UTF-8') === mb_strtolower($mensagem, 'UTF-8')
-            && $tsAtualizacao && ($tempoAtual - $tsAtualizacao) < $janelaDuplicata) {
-            return $this->respond(['ignorado' => 'mensagem duplicada (janela curta)'], 200);
-        }
-        if ($tsAtualizacao && ($tempoAtual - $tsAtualizacao) < $cooldownResposta) {
-            return $this->respond(['ignorado' => 'cooldown ativo'], 200);
-        }
-
-        // lock curto
-        $cacheKey = "ia_lock_{$usuarioId}_{$nossoNumero}_{$numero}";
-        if ($cache->get($cacheKey)) {
-            return $this->respond(['ignorado' => 'processamento em andamento'], 200);
-        }
-        $cache->save($cacheKey, 1, 10);
 
         try {
-            // etapas válidas (por usuário)
-            $etapasValidas = (array) $sessaoModel->listarEtapasUsuario($usuarioId);
-            if (!empty($etapasValidas) && is_array($etapasValidas) && isset($etapasValidas[0]) && is_array($etapasValidas[0]) && isset($etapasValidas[0]['etapa'])) {
-                $etapasValidas = array_map(fn($r) => (string)$r['etapa'], $etapasValidas);
+            // Aguarda silêncio de quinze segundos
+            while (true) {
+                $payload1 = $this->lerBatch(\Config\Services::cache(), $batchKey);
+                $lastAt   = (int) ($payload1['last_at'] ?? time());
+                $sleepFor = ($lastAt + 15) - time();
+                if ($sleepFor > 0) {
+                    sleep(min(15, max(1, $sleepFor)));
+                }
+                $payload2 = $this->lerBatch(\Config\Services::cache(), $batchKey);
+                if ((int) ($payload2['last_at'] ?? 0) === $lastAt) {
+                    $mensagemAgregada = trim((string) ($payload2['text'] ?? $mensagem));
+                    if ($mensagemAgregada === '') $mensagemAgregada = $mensagem;
+                    $mensagem = $mensagemAgregada;
+                    break;
+                }
             }
+
+            // Silêncio por etapa humano
+            if ($etapaAtual === 'humano') {
+                $historico = json_decode($sessao['historico'] ?? '[]', true) ?: [];
+                $historico[] = ['role' => 'user', 'content' => $mensagem, 'linha' => $nossoNumero];
+
+                $linhaValida = $this->validarLinhaParaSessao($usuarioId, $nossoNumero);
+                $extras = [
+                    'ultima_mensagem_usuario' => $mensagem,
+                    'ultima_resposta_ia'      => null,
+                    'historico'               => json_encode($historico, JSON_UNESCAPED_UNICODE),
+                ];
+                if ($linhaValida) $extras['linha_numero'] = $linhaValida;
+
+                $this->moverSessaoParaEtapa($sessaoModel, $numero, $usuarioId, $etapaAtual, $extras);
+                $this->limparBatch(\Config\Services::cache(), $batchKey);
+                return $this->respond(['ok' => 'Inteligência Artificial silenciosa na etapa humano'], 200);
+            }
+
+            // Silêncio se humano interagiu recentemente
+            if ($this->humanoMandouRecentemente($usuarioId, $numero, $canalLinha, 120)) {
+                $historico = json_decode($sessao['historico'] ?? '[]', true) ?: [];
+                $historico[] = ['role' => 'user', 'content' => $mensagem, 'linha' => $nossoNumero];
+
+                $linhaValida = $this->validarLinhaParaSessao($usuarioId, $nossoNumero);
+                $extras = [
+                    'ultima_mensagem_usuario' => $mensagem,
+                    'ultima_resposta_ia'      => null,
+                    'historico'               => json_encode($historico, JSON_UNESCAPED_UNICODE),
+                ];
+                if ($linhaValida) $extras['linha_numero'] = $linhaValida;
+
+                $this->moverSessaoParaEtapa($sessaoModel, $numero, $usuarioId, $etapaAtual, $extras);
+                $this->limparBatch(\Config\Services::cache(), $batchKey);
+                return $this->respond(['ok' => 'Inteligência Artificial silenciosa por atividade humana recente'], 200);
+            }
+
+            // Verifica se a etapa permite resposta automática
+            $cfgEtapaAtual      = $this->obterConfigEtapa($assinanteId, $etapaAtual) ?? [];
+            $iaPode             = (int) ($cfgEtapaAtual['ia_pode_responder'] ?? 1) === 1;
+            $responderPermitido = $iaPode;
+
+            // Etapas válidas
+            $etapasValidas    = $this->listarEtapasValidas($usuarioId, $assinanteId);
             $etapasValidasSet = array_flip($etapasValidas);
 
-            // 1) Se HUMANO assumiu (etapa='humano') => IA SILENCIOSA + não mudar etapa
-            if ($etapaAtual === 'humano') {
-                $historico = json_decode($sessao['historico'] ?? '[]', true);
-                if (!is_array($historico)) $historico = [];
-                $historico[] = ['role' => 'user', 'content' => $mensagem];
+            // Histórico completo da sessão
+            $sessao = $sessaoModel->getOuCriarSessao($numero, $usuarioId); // refetch
+            $historicoCompleto = json_decode($sessao['historico'] ?? '[]', true) ?: [];
 
-                $sessaoModel->where('numero', $numero)->where('usuario_id', $usuarioId)->set([
-                    'etapa'                   => 'humano', // mantém travada
-                    'ultima_mensagem_usuario' => $mensagem,
-                    'ultima_resposta_ia'      => null,
-                    'historico'               => json_encode($historico, JSON_UNESCAPED_UNICODE),
-                ])->update();
-
-                return $this->respond(['ok' => 'IA silenciosa: atendimento humano ativo'], 200);
+            // Histórico filtrado desta linha
+            $historicoFiltrado = [];
+            foreach ($historicoCompleto as $h) {
+                if (!is_array($h)) continue;
+                $linhaMsg = (string) ($h['linha'] ?? '');
+                if ($linhaMsg === '' || $linhaMsg === $nossoNumero) {
+                    $r = ['role' => ($h['role'] ?? ''), 'content' => ($h['content'] ?? '')];
+                    if ($linhaMsg !== '') $r['linha'] = $linhaMsg;
+                    $historicoFiltrado[] = $r;
+                }
             }
 
-            // 2) Se a ÚLTIMA mensagem antes desta foi de HUMANO, também silencia (mesmo que tenham mudado etapa)
-            if ($ultimoRoleAntes === 'humano') {
-                $historico = json_decode($sessao['historico'] ?? '[]', true);
-                if (!is_array($historico)) $historico = [];
-                $historico[] = ['role' => 'user', 'content' => $mensagem];
+            // Primeiro contato com saudação simples
+            $isPrimeiroTurno = count($historicoFiltrado) === 0;
+            if ($isPrimeiroTurno && $this->mensagemSemIntent($mensagem)) {
+                $nomeLead = $this->primeiroNome($pushname);
+                $reply = $nomeLead !== ''
+                    ? "oi, {$nomeLead}! tudo bem? me conta como posso te ajudar :)"
+                    : "oi! tudo bem? me conta como posso te ajudar :)";
 
-                $sessaoModel->where('numero', $numero)->where('usuario_id', $usuarioId)->set([
-                    'etapa'                   => $etapaAtual, // não mexe
+                $historicoCompleto[] = ['role' => 'user', 'content' => $mensagem, 'linha' => $nossoNumero];
+                if ($responderPermitido) {
+                    $historicoCompleto[] = ['role' => 'assistant', 'content' => $reply, 'linha' => $nossoNumero];
+                }
+
+                $linhaValida = $this->validarLinhaParaSessao($usuarioId, $nossoNumero);
+                $extras = [
                     'ultima_mensagem_usuario' => $mensagem,
-                    'ultima_resposta_ia'      => null,
-                    'historico'               => json_encode($historico, JSON_UNESCAPED_UNICODE),
-                ])->update();
+                    'historico'               => json_encode($historicoCompleto, JSON_UNESCAPED_UNICODE),
+                ];
+                if ($linhaValida) $extras['linha_numero'] = $linhaValida;
 
-                return $this->respond(['ok' => 'IA silenciosa: humano ainda conversando'], 200);
+                $this->moverSessaoParaEtapa($sessaoModel, $numero, $usuarioId, 'entrada', $extras);
+
+                if ($responderPermitido) {
+                    [$tokenPreferido, $linhaEnvio] = $this->escolherCanalEnvio($usuarioId, $nossoNumero, null);
+                    $this->enviarParaWhatsapp($usuarioId, $linhaEnvio, $numero, $reply, $tokenPreferido ?: null);
+                    $this->salvarMensagemChat($numero, 'assistant', $reply, $canalBase . ':' . $linhaEnvio, $usuarioId);
+                    $sessaoModel->where('numero', $numero)->where('usuario_id', $usuarioId)
+                        ->set(['ultima_resposta_ia' => $reply])->update();
+                } else {
+                    $sessaoModel->where('numero', $numero)->where('usuario_id', $usuarioId)
+                        ->set(['ultima_resposta_ia' => null])->update();
+                }
+
+                $this->limparBatch(\Config\Services::cache(), $batchKey);
+                return $this->respond([
+                    'status'    => 'processado',
+                    'etapa'     => 'entrada',
+                    'moveu'     => false,
+                    'confianca' => 0.0,
+                ]);
             }
 
-            // 3) intenção -> etapa (simples) + alinhamento (apenas se não for humano)
-            $mensagemLower = mb_strtolower($mensagem, 'UTF-8');
-            $palavrasChave = [
-                'agendamento' => ['agendar', 'consulta', 'marcar', 'horário', 'horario', 'atendimento'],
-                'financeiro'  => ['valor', 'preço', 'preco', 'custo', 'quanto', 'pix', 'pagamento', 'pagar'],
-                'perdido'     => ['desistir', 'não quero', 'nao quero', 'não tenho interesse', 'nao tenho interesse', 'não posso', 'nao posso', 'depois eu vejo'],
-                'em_contato'  => ['me explica', 'quero saber mais', 'entendi', 'ok', 'vamos conversar', 'pode me falar', 'pode explicar'],
+            // Acrescenta a mensagem consolidada aos históricos
+            $historicoFiltrado[] = ['role' => 'user', 'content' => $mensagem, 'linha' => $nossoNumero];
+            $historicoCompleto[] = ['role' => 'user', 'content' => $mensagem, 'linha' => $nossoNumero];
+
+            // Nome e tratamento do profissional vinculado à instância
+            $prof = $this->pegarProfissionalNomeTratamento($usuarioId);
+
+            // Mensagens para a Inteligência Artificial apenas desta linha
+            $promptPadrao = get_prompt_padrao();
+            $mensagensIA  = [['role' => 'system', 'content' => $promptPadrao]];
+            foreach ($historicoFiltrado as $msg) {
+                if (isset($msg['role'], $msg['content'])) {
+                    $mensagensIA[] = ['role' => $msg['role'], 'content' => $msg['content']];
+                }
+            }
+
+            // Chamada estruturada
+            $open = new OpenrouterModel();
+            $estruturada = $open->enviarMensagemEstruturada($mensagensIA, null, [
+                'modelo_humano'           => true,
+                'temperatura'             => 0.6,
+                'estiloMocinha'           => true,
+                'tom_proximo'             => true,
+                'conciso'                 => true,
+                'max_frases'              => 3,
+                'max_chars'               => 280,
+                'pergunta_unica'          => true,
+                'continuityGuard'         => true,
+                'assinante_id'            => $assinanteId,
+                'etapa'                   => $etapaAtual,
+                'max_tokens'              => 220,
+                'etapas_validas'          => $etapasValidas,
+                'fallback_etapas'         => ['entrada','qualificacao','agendamento','pagamento','finalizado','humano'],
+                'responder_permitido'     => $responderPermitido,
+                'profissional_nome'       => $prof['nome'] ?? '',
+                'profissional_tratamento' => $prof['tratamento'] ?? 'Dra./Dr.',
+                'linha_atual'             => $nossoNumero,
+            ]);
+
+            if (!is_array($estruturada) || !($estruturada['ok'] ?? false)) {
+                // Sem resposta da IA: apenas persistir histórico
+                $linhaValida = $this->validarLinhaParaSessao($usuarioId, $nossoNumero);
+                $extras = [
+                    'ultima_mensagem_usuario' => $mensagem,
+                    'ultima_resposta_ia'      => null,
+                    'historico'               => json_encode($historicoCompleto, JSON_UNESCAPED_UNICODE),
+                ];
+                if ($linhaValida) $extras['linha_numero'] = $linhaValida;
+
+                $this->moverSessaoParaEtapa($sessaoModel, $numero, $usuarioId, $etapaAtual, $extras);
+                $this->limparBatch(\Config\Services::cache(), $batchKey);
+                return $this->respond(['ignorado' => 'IA não respondeu; sem movimentação'], 200);
+            }
+
+            $reply      = (string) ($estruturada['reply'] ?? '');
+            $etapaAI    = $estruturada['etapa_sugerida'] ?? null;
+            $moverAgora = (bool)   ($estruturada['mover_agora'] ?? false);
+            $confianca  = (float)  ($estruturada['confianca'] ?? 0.0);
+
+            // Política de movimentação
+            $podeMover  = ($etapaAI && isset($etapasValidasSet[$etapaAI])) && ($moverAgora || $confianca >= 0.5);
+            $etapaFinal = $podeMover ? $etapaAI : $etapaAtual;
+
+            // Reativação após sete dias
+            if ($reply !== '' && $responderPermitido && !empty($paciente['ultimo_contato'])) {
+                $tempoUltimoContato = strtotime((string) $paciente['ultimo_contato']);
+                if ($tempoUltimoContato && (time() - $tempoUltimoContato) > 604800) {
+                    $reply = "Que bom te ver por aqui de novo! 😊\n" . $reply;
+                }
+            }
+
+            // Atualiza histórico com a resposta
+            if ($reply !== '' && $responderPermitido) {
+                $historicoCompleto[] = ['role' => 'assistant', 'content' => $reply, 'linha' => $nossoNumero];
+            }
+
+            // Persistência
+            $linhaValida = $this->validarLinhaParaSessao($usuarioId, $nossoNumero);
+            $extras = [
+                'ultima_mensagem_usuario' => $mensagem,
+                'historico'               => json_encode($historicoCompleto, JSON_UNESCAPED_UNICODE),
             ];
-            $novaEtapa = $etapaAtual;
-            foreach ($palavrasChave as $etapa => $palavras) {
-                foreach ($palavras as $p) {
-                    if (mb_strpos($mensagemLower, $p, 0, 'UTF-8') !== false) {
-                        $alinhada = $sessaoModel->alinharEtapaUsuario($etapa, $usuarioId);
-                        if ($alinhada && isset($etapasValidasSet[$alinhada])) {
-                            $novaEtapa = $alinhada;
-                            break 2;
-                        }
+            if ($linhaValida) $extras['linha_numero'] = $linhaValida;
+
+            $this->moverSessaoParaEtapa($sessaoModel, $numero, $usuarioId, $etapaFinal, $extras);
+
+            // Envio
+            if ($reply !== '' && $responderPermitido) {
+                [$tokenPreferido, $linhaEnvio] = $this->escolherCanalEnvio($usuarioId, $nossoNumero, null);
+                $partes = $this->quebrarMensagemEmDuas($reply, 1200, 1200);
+                foreach ($partes as $i => $parte) {
+                    $sessaoModel->where('numero', $numero)->where('usuario_id', $usuarioId)
+                        ->set(['ultima_resposta_ia' => $parte])->update();
+
+                    $this->enviarParaWhatsapp($usuarioId, $linhaEnvio, $numero, $parte, $tokenPreferido ?: null);
+                    $this->salvarMensagemChat($numero, 'assistant', $parte, $canalBase . ':' . $linhaEnvio, $usuarioId);
+
+                    if ($i === 0 && count($partes) > 1) {
+                        sleep(1);
                     }
                 }
-            }
-
-            // etapa final sanitizada
-            $etapaFinal = ($novaEtapa !== $etapaAtual && isset($etapasValidasSet[$novaEtapa]))
-                ? $novaEtapa
-                : (isset($etapasValidasSet[$etapaAtual]) ? $etapaAtual : 'inicio');
-
-            // === Config da ETAPA (respeito ao ia_pode_responder) ===
-            $cfgEtapa = $this->obterConfigEtapa($assinanteId, $etapaFinal) ?? [];
-            $iaPode   = (int)($cfgEtapa['ia_pode_responder'] ?? 1) === 1;
-
-            // histórico (carrega e adiciona user)
-            $historico = json_decode($sessao['historico'] ?? '[]', true);
-            if (!is_array($historico)) $historico = [];
-            $historico[] = ['role' => 'user', 'content' => $mensagem];
-
-            // Se a etapa não permite IA, apenas registra e sai (não muda etapa por humano)
-            if (!$iaPode) {
+            } else {
                 $sessaoModel->where('numero', $numero)->where('usuario_id', $usuarioId)
-                    ->set([
-                        'etapa'                   => $etapaFinal,
-                        'ultima_mensagem_usuario' => $mensagem,
-                        'ultima_resposta_ia'      => null,
-                        'historico'               => json_encode($historico, JSON_UNESCAPED_UNICODE),
-                    ])->update();
-
-                return $this->respond(['ok' => "IA silenciosa por configuração da etapa '{$etapaFinal}'"], 200);
+                    ->set(['ultima_resposta_ia' => null])->update();
             }
 
-            // ========== IA habilitada ==========
-            // Revisita (>7 dias)
-            $mensagemRevisita = '';
-            if (!empty($paciente['ultimo_contato'])) {
-                $tempoUltimoContato = strtotime((string)$paciente['ultimo_contato']);
-                if ($tempoUltimoContato && (time() - $tempoUltimoContato) > 604800) {
-                    $mensagemRevisita = "Que bom te ver por aqui de novo! 😊";
-                }
-            }
+            $this->limparBatch(\Config\Services::cache(), $batchKey);
 
-            // prompt + histórico
-            $prompt    = get_prompt_padrao();
-            $mensagens = [['role' => 'system', 'content' => $prompt]];
-            foreach ($historico as $msg) {
-                if (isset($msg['role'], $msg['content'])) $mensagens[] = $msg;
-            }
-
-            // latência leve (opcional)
-            sleep(3);
-
-            // Chamada IA (passando ETAPA FINAL)
-            $open            = new OpenrouterModel();
-            $respostaGerada  = $open->enviarMensagem($mensagens, null, [
-                'temperatura'   => 0.8,
-                'top_p'         => 0.9,
-                'estiloMocinha' => true,
-                'max_tokens'    => 300,
-                'assinante_id'  => $assinanteId,
-                'etapa'         => $etapaFinal,
+            return $this->respond([
+                'status'    => 'processado',
+                'etapa'     => $etapaFinal,
+                'moveu'     => $podeMover,
+                'confianca' => $confianca,
             ]);
-            if ($mensagemRevisita) {
-                $respostaGerada = $mensagemRevisita . "\n" . $respostaGerada;
-            }
-
-            // fecha histórico
-            $historico[] = ['role' => 'assistant', 'content' => $respostaGerada];
-
-            // persiste sessão
-            $sessaoModel->where('numero', $numero)->where('usuario_id', $usuarioId)->set([
-                'etapa'                   => $etapaFinal,
-                'ultima_mensagem_usuario' => $mensagem,
-                'ultima_resposta_ia'      => $respostaGerada,
-                'historico'               => json_encode($historico, JSON_UNESCAPED_UNICODE),
-            ])->update();
-
-            // === Canal de envio conforme etapa ===
-            [$tokenPreferido, $linhaEnvio] = $this->escolherCanalEnvio($usuarioId, $nossoNumero, $cfgEtapa);
-
-            // envia
-            $this->enviarParaWhatsapp($usuarioId, $linhaEnvio, $numero, $respostaGerada, $tokenPreferido ?: null);
-
-            // loga saída
-            $this->salvarMensagemChat($numero, 'assistant', $respostaGerada, $canal, $usuarioId);
-
-            // notificação se mudou de etapa
-            if ($etapaFinal !== $etapaAtual) {
-                $this->enviarNotificacoesSeEtapaMonitorada(
-                    $usuarioId, $etapaFinal, $numero, $paciente['nome'] ?? 'Paciente', $linhaEnvio, $etapasValidasSet
-                );
-            }
-
-            return $this->respond(['status' => 'mensagem enviada']);
         } finally {
-            $cache->delete($cacheKey);
+            $this->releaseWorkerLock($lockName);
         }
     }
 
-    /* =================== Notificações por etapa =================== */
-
-    private function enviarNotificacoesSeEtapaMonitorada(
-        int $usuarioId,
-        string $etapa,
-        string $numeroLead,
-        string $nomeLead,
-        string $nossoNumeroParaEnvio,
-        array  $etapasValidasSet
-    ): void {
+    /** Lê configuração de Inteligência Artificial da etapa. */
+    private function obterConfigEtapa(int $assinanteId, string $etapa): ?array
+    {
         $db = \Config\Database::connect();
+        $row = $db->table('config_ia')
+            ->where('assinante_id', $assinanteId)
+            ->where('etapa_atual', trim($etapa))
+            ->limit(1)
+            ->get()
+            ->getRowArray();
 
-        $regras = $db->table('notificacoes_regras')
-            ->where('ativo', 1)
-            ->where('usuario_id', $usuarioId)
-            ->get()->getResultArray();
+        return $row ?: null;
+    }
 
-        $etapasMonitoradas = [];
-        $templatesPorEtapa = [];
-        foreach ($regras as $r) {
-            $e = (string)$r['etapa'];
-            if ($e !== '' && isset($etapasValidasSet[$e])) {
-                $etapasMonitoradas[] = $e;
-                if (!empty($r['mensagem_template'])) {
-                    $templatesPorEtapa[$e] = $r['mensagem_template'];
-                }
-            }
-        }
+    /* =================== Espaço reservado para rotinas futuras =================== */
 
-        if (!in_array($etapa, $etapasMonitoradas, true)) return;
-
-        $destinos = $db->table('notificacoes_whatsapp')
-            ->where('ativo', 1)
-            ->where('usuario_id', $usuarioId)
-            ->get()->getResultArray();
-        if (empty($destinos)) return;
-
-        $template = $templatesPorEtapa[$etapa] ?? "Novo lead em *{$etapa}*:\nNome: {nome}\nTelefone: +{numero}";
-        $msgBase  = strtr($template, [
-            '{etapa}'  => $etapa,
-            '{nome}'   => $nomeLead ?: 'Paciente',
-            '{numero}' => $numeroLead,
-        ]);
-
-        foreach ($destinos as $d) {
-            $numeroDestino = $this->soDigitos((string)($d['numero'] ?? ''));
-            if ($numeroDestino) {
-                // mesmo canal usado para responder ao lead
-                $this->enviarParaWhatsapp($usuarioId, $nossoNumeroParaEnvio, $numeroDestino, $msgBase);
-            }
-        }
+    private function agendarNotificacaoEtapa(int $usuarioId, string $etapa, string $numeroLead, string $nomeLead): void
+    {
+        // Exemplo: inserir em fila para notificação posterior.
     }
 }

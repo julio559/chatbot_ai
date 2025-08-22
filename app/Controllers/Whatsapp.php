@@ -5,8 +5,10 @@ use CodeIgniter\HTTP\ResponseInterface;
 
 class Whatsapp extends BaseController
 {
-    /** util: pega 1 instância do usuário atual por ID */
-    private function findInstanceById(int $id): ?array {
+    /* =================== Utils DB & num =================== */
+
+    private function findInstanceById(int $id): ?array
+    {
         $db = \Config\Database::connect();
         return $db->table('whatsapp_instancias')
             ->where('id', $id)
@@ -14,60 +16,214 @@ class Whatsapp extends BaseController
             ->get()->getRowArray() ?: null;
     }
 
-    /** util: só dígitos */
-    private function digits(?string $v): string {
-        return preg_replace('/\D+/', '', (string)$v);
+    private function digits(?string $v): string
+    {
+        return preg_replace('/\D+/', '', (string) $v);
     }
 
-    /** util: normaliza o status retornado pela UltraMSG */
-    private function parseUltraStatus(array $raw): array {
-        $status     = null; // 'qr' | 'authenticated' | 'loading'...
-        $statusText = null; // 'connected' | 'pairing'...
-        $statusNote = null;
-
-        if (isset($raw['accountStatus']) && is_array($raw['accountStatus'])) {
-            $status     = $raw['accountStatus']['status']    ?? null;
-            $statusText = $raw['accountStatus']['substatus'] ?? null;
-        }
-
-        if (!$status && isset($raw['status']) && is_array($raw['status'])) {
-            if (isset($raw['status']['accountStatus']) && is_array($raw['status']['accountStatus'])) {
-                $status     = $raw['status']['accountStatus']['status']    ?? $status;
-                $statusText = $raw['status']['accountStatus']['substatus'] ?? $statusText;
-            }
-            if (!$status && isset($raw['status']['status']) && is_string($raw['status']['status'])) {
-                $status = $raw['status']['status'];
-            }
-            if (!$statusNote && isset($raw['status']['message'])) {
-                $statusNote = $raw['status']['message'];
-            } elseif (!$statusNote && isset($raw['status']['statusMessage'])) {
-                $statusNote = $raw['status']['statusMessage'];
-            }
-        }
-
-        if (!$status && isset($raw['status']) && is_string($raw['status'])) {
-            $status = $raw['status'];
-        }
-
-        if (!$statusNote && isset($raw['message'])) {
-            $statusNote = $raw['message'];
-        } elseif (!$statusNote && isset($raw['statusMessage'])) {
-            $statusNote = $raw['statusMessage'];
-        }
-
-        return [$status, $statusText, $statusNote];
+    private function gwDigits(?string $v): string
+    {
+        return preg_replace('/\D+/', '', (string) $v);
     }
 
-    /** Página de conexão */
+    /* =================== HTTP helpers =================== */
+
+    /** Lê o body com tolerância: JSON -> raw JSON -> POST form */
+    private function safeJsonBody(): array
+    {
+        try {
+            $j = $this->request->getJSON(true);
+            if (is_array($j)) {
+                return $j;
+            }
+        } catch (\Throwable $e) {
+            // fallback
+        }
+
+        $raw = (string) $this->request->getBody();
+        if ($raw !== '') {
+            $arr = json_decode($raw, true);
+            if (is_array($arr)) {
+                return $arr;
+            }
+        }
+
+        $post = $this->request->getPost();
+        return is_array($post) ? $post : [];
+    }
+
+    /**
+     * Cliente HTTP pro gateway (Node Baileys).
+     * Retorna: ['ok'=>bool, 'json'=>array|null, 'raw'=>string|null, 'code'=>int, 'err'=>string|null]
+     */
+    private function gwCall(string $method, string $path, array $data = []): array
+    {
+        $base = rtrim((string) env('GATEWAY_URL'), '/');
+        $key  = (string) env('GATEWAY_KEY');
+
+        if ($base === '' || $key === '') {
+            return ['ok' => false, 'err' => 'GATEWAY_URL/GATEWAY_KEY ausentes no .env'];
+        }
+
+        $client = \Config\Services::curlrequest();
+
+        $opts = [
+            'http_errors' => false,
+            'headers'     => ['x-api-key' => $key],
+            'timeout'     => 25,
+        ];
+
+        if (strtoupper($method) === 'GET') {
+            if (!empty($data)) {
+                $opts['query'] = $data; // suporta ?autoheal=1 etc
+            }
+        } else {
+            $opts['json'] = $data;
+        }
+
+        try {
+            $res  = $client->request($method, $base . $path, $opts);
+            $code = $res->getStatusCode();
+            $body = (string) $res->getBody();
+            $ct   = $res->getHeaderLine('Content-Type');
+
+            $json = json_decode($body, true);
+            if ($json === null && stripos($ct, 'application/json') === false) {
+                return ['ok' => $code >= 200 && $code < 300, 'raw' => $body, 'code' => $code];
+            }
+
+            return ['ok' => $code >= 200 && $code < 300, 'json' => $json, 'code' => $code];
+        } catch (\Throwable $e) {
+            return ['ok' => false, 'err' => 'gateway unreachable: ' . $e->getMessage()];
+        }
+    }
+
+    /* =================== Endpoint unificado pro gateway =================== */
+    /**
+     * POST /whatsapp/gw
+     * Body:
+     *  { "op":"create" }
+     *  { "op":"status","sid":"..." }
+     *  { "op":"qr","sid":"..." }
+     *  { "op":"pair","sid":"...","phone":"553199..." }
+     *  { "op":"send","sid":"...","to":"553199...","text":"..." }
+     *  { "op":"end","sid":"..." }
+     */
+    public function gw()
+    {
+        $payload = $this->safeJsonBody();
+        $op      = strtolower((string) ($payload['op'] ?? ''));
+
+        if ($op === '') {
+            return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'err' => 'op obrigatório']);
+        }
+
+        switch ($op) {
+            case 'create': {
+                $sid  = isset($payload['sid']) ? (string) $payload['sid'] : null;
+                $data = $sid ? ['sid' => $sid] : [];
+                $r = $this->gwCall('POST', '/session', $data);
+                if (!$r['ok']) {
+                    return $this->response->setStatusCode(502)->setJSON([
+                        'ok' => false, 'err' => $r['err'] ?? 'gateway error', 'raw' => $r['json'] ?? ($r['raw'] ?? null),
+                    ]);
+                }
+                return $this->response->setJSON($r['json'] ?? ['ok' => true]);
+            }
+
+            case 'status': {
+                $sid = (string) ($payload['sid'] ?? '');
+                if ($sid === '') {
+                    return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'err' => 'sid obrigatório']);
+                }
+                // autoheal on
+                $r = $this->gwCall('GET', "/session/{$sid}/status", ['autoheal' => 1]);
+                if (!$r['ok']) {
+                    return $this->response->setStatusCode(502)->setJSON([
+                        'ok' => false, 'err' => $r['err'] ?? 'gateway error', 'raw' => $r['json'] ?? ($r['raw'] ?? null),
+                    ]);
+                }
+                return $this->response->setJSON($r['json'] ?? ['ok' => true, 'status' => 'unknown']);
+            }
+
+            case 'qr': {
+                $sid = (string) ($payload['sid'] ?? '');
+                if ($sid === '') {
+                    return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'err' => 'sid obrigatório']);
+                }
+                $r = $this->gwCall('GET', "/session/{$sid}/qr");
+                if (!$r['ok']) {
+                    return $this->response->setStatusCode(502)->setJSON([
+                        'ok' => false, 'err' => $r['err'] ?? 'gateway error', 'raw' => $r['json'] ?? ($r['raw'] ?? null),
+                    ]);
+                }
+                return $this->response->setJSON($r['json'] ?? ['ok' => true, 'status' => 'unknown', 'qr' => null]);
+            }
+
+            case 'pair': {
+                $sid   = (string) ($payload['sid'] ?? '');
+                $phone = $this->gwDigits($payload['phone'] ?? '');
+                if ($sid === '' || $phone === '') {
+                    return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'err' => 'sid e phone obrigatórios']);
+                }
+                $r = $this->gwCall('POST', "/session/{$sid}/pair", ['phone' => $phone]);
+                if (!$r['ok']) {
+                    $msg = $r['err'] ?? ($r['json']['error'] ?? 'gateway error');
+                    return $this->response->setStatusCode(502)->setJSON([
+                        'ok' => false, 'err' => $msg, 'raw' => $r['json'] ?? ($r['raw'] ?? null),
+                    ]);
+                }
+                return $this->response->setJSON($r['json'] ?? ['ok' => true]);
+            }
+
+            case 'send': {
+                $sid  = (string) ($payload['sid'] ?? '');
+                $to   = $this->gwDigits($payload['to'] ?? '');
+                $text = (string) ($payload['text'] ?? '');
+                if ($sid === '' || $to === '' || $text === '') {
+                    return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'err' => 'sid, to e text são obrigatórios']);
+                }
+                $r = $this->gwCall('POST', "/session/{$sid}/send", ['to' => $to, 'text' => $text]);
+                if (!$r['ok']) {
+                    $msg = $r['err'] ?? ($r['json']['error'] ?? 'gateway error');
+                    return $this->response->setStatusCode(502)->setJSON([
+                        'ok' => false, 'err' => $msg, 'raw' => $r['json'] ?? ($r['raw'] ?? null),
+                    ]);
+                }
+                return $this->response->setJSON($r['json'] ?? ['ok' => true]);
+            }
+
+            case 'end': {
+                $sid = (string) ($payload['sid'] ?? '');
+                if ($sid === '') {
+                    return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'err' => 'sid obrigatório']);
+                }
+                $r = $this->gwCall('DELETE', "/session/{$sid}");
+                if (!$r['ok']) {
+                    return $this->response->setStatusCode(502)->setJSON([
+                        'ok' => false, 'err' => $r['err'] ?? 'gateway error', 'raw' => $r['json'] ?? ($r['raw'] ?? null),
+                    ]);
+                }
+                return $this->response->setJSON($r['json'] ?? ['ok' => true]);
+            }
+
+            default:
+                return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'err' => 'op inválida']);
+        }
+    }
+
+    /* =================== Página =================== */
+
     public function index()
     {
         $db = \Config\Database::connect();
         $lista = $db->table('whatsapp_instancias')
             ->where('usuario_id', (int) session('usuario_id'))
-            ->orderBy('id','desc')
+            ->orderBy('id', 'desc')
             ->get()->getResultArray();
 
-        $webhookBase = base_url('webhook');
+        // nosso webhook próprio
+        $webhookBase = base_url('webhook-sessao/receive');
 
         return view('whatsapp_connect', [
             'instancias'  => $lista,
@@ -75,166 +231,265 @@ class Whatsapp extends BaseController
         ]);
     }
 
-    /** webhook base JSON */
     public function webhookBase()
     {
         return $this->response->setJSON([
-            'webhookBase' => base_url('webhook'),
+            'webhookBase' => base_url('webhook-sessao/receive'),
         ]);
     }
 
-    /** Salva credenciais em uma instância existente (ou cria) */
+    /* =================== Criar/Editar instância =================== */
+
     public function bind()
     {
         $id       = (int) ($this->request->getPost('id') ?? 0); // 0 = criar
-        $instance = trim((string) ($this->request->getPost('instance_id') ?? ''));
-        $token    = trim((string) ($this->request->getPost('token') ?? ''));
         $nome     = trim((string) ($this->request->getPost('nome') ?? ''));
         $linha    = $this->digits($this->request->getPost('linha_msisdn') ?? '');
+        $sidForm  = trim((string) ($this->request->getPost('sid') ?? '')); // permitido informar
+        $nome     = $nome !== '' ? $nome : 'Instância';
 
-        $nome = $nome !== '' ? $nome : 'Instância';
+        $db        = \Config\Database::connect();
+        $usuarioId = (int) session('usuario_id');
 
-        // regras:
-        // - instance é obrigatório
-        // - token é obrigatório na CRIAÇÃO
-        // - linha_msisdn é obrigatória na CRIAÇÃO (para roteamento correto)
-        if (!$instance || ($id <= 0 && !$token) || ($id <= 0 && !$linha)) {
-            return $this->response->setStatusCode(422)->setJSON([
-                'ok'=>false,
-                'msg'=>'Instance ID obrigatório. Token e Número da linha são obrigatórios na criação.'
+        if ($id > 0) {
+            // editar nome/linha/sid
+            $curr = $this->findInstanceById($id);
+            if (!$curr) {
+                return $this->response->setStatusCode(404)->setJSON(['ok' => false, 'msg' => 'instância não encontrada']);
+            }
+
+            $sid = $sidForm !== '' ? $sidForm : (string) ($curr['sid'] ?? $curr['instance_id'] ?? '');
+
+            // se mudou o SID, tenta garantir que sessão exista no gateway
+            if ($sid !== '' && $sid !== (string) ($curr['sid'] ?? '')) {
+                $this->gwCall('POST', '/session', ['sid' => $sid]);
+            }
+
+            $upd = [
+                'nome'         => $nome,
+                'linha_msisdn' => $linha ?: $curr['linha_msisdn'],
+                'sid'          => $sid ?: ($curr['sid'] ?? null),
+                'instance_id'  => $sid ?: ($curr['instance_id'] ?? null), // compat UI
+                'updated_at'   => date('Y-m-d H:i:s'),
+            ];
+            $db->table('whatsapp_instancias')
+                ->where('id', $id)->where('usuario_id', $usuarioId)->update($upd);
+
+            return $this->response->setJSON(['ok' => true, 'id' => $id]);
+        }
+
+        // criar: usa SID informado ou gera no gateway
+        if ($sidForm !== '') {
+            $r = $this->gwCall('POST', '/session', ['sid' => $sidForm]);
+        } else {
+            $r = $this->gwCall('POST', '/session', []);
+        }
+
+        if (!$r['ok'] || empty($r['json']['sid'])) {
+            return $this->response->setStatusCode(502)->setJSON([
+                'ok'  => false,
+                'msg' => 'Falha ao criar sessão no gateway',
+                'raw' => $r['json'] ?? ($r['raw'] ?? null),
+            ]);
+        }
+        $sid = (string) $r['json']['sid'];
+
+        // salva no banco (guarde sid também em instance_id p/ compatibilidade da UI)
+        $db->table('whatsapp_instancias')->insert([
+            'usuario_id'   => $usuarioId,
+            'nome'         => $nome,
+            'instance_id'  => $sid,        // compat com a UI atual
+            'sid'          => $sid,        // coluna própria
+            'linha_msisdn' => $linha ?: null,
+            'webhook_url'  => (string) ($this->request->getPost('webhook_url') ?? base_url('webhook-sessao/receive')),
+            'created_at'   => date('Y-m-d H:i:s'),
+            'updated_at'   => date('Y-m-d H:i:s'),
+        ]);
+        $newId = (int) $db->insertID();
+
+        // webhook (além de gravar no banco, seta no gateway por sessão)
+        $hook = (string) ($this->request->getPost('webhook_url') ?? base_url('webhook-sessao/receive'));
+        if ($hook) {
+            $this->gwCall('POST', "/session/{$sid}/webhook", ['webhook_url' => $hook]);
+            $db->table('whatsapp_instancias')->where('id', $newId)->update([
+                'webhook_url' => $hook,
+                'updated_at'  => date('Y-m-d H:i:s'),
             ]);
         }
 
-        $db = \Config\Database::connect();
-
-        // manter token atual se editar e enviar vazio
-        $curr = null;
-        if ($id > 0) {
-            $curr = $db->table('whatsapp_instancias')
-                ->where('id', $id)
-                ->where('usuario_id', (int) session('usuario_id'))
-                ->get()->getRowArray();
-            if (!$curr) {
-                return $this->response->setStatusCode(404)->setJSON(['ok'=>false,'msg'=>'instância não encontrada']);
-            }
-            if ($token === '') $token = $curr['token'];
-            if ($linha === '') $linha = (string)($curr['linha_msisdn'] ?? '');
-        }
-
-        $data = [
-            'usuario_id'   => (int) session('usuario_id'),
-            'nome'         => $nome,
-            'instance_id'  => $instance,
-            'token'        => $token,
-            'linha_msisdn' => $linha ?: null, // pode ficar null no update se já existir
-            'updated_at'   => date('Y-m-d H:i:s'),
-        ];
-
-        if ($id > 0) {
-            $ok = $db->table('whatsapp_instancias')
-                ->where('id', $id)
-                ->where('usuario_id', (int) session('usuario_id'))
-                ->update($data);
-            return $this->response->setJSON(['ok' => (bool) $ok, 'id' => $id]);
-        } else {
-            $data['created_at'] = date('Y-m-d H:i:s');
-            $db->table('whatsapp_instancias')->insert($data);
-            return $this->response->setJSON(['ok'=>true, 'id' => (int)$db->insertID()]);
-        }
+        return $this->response->setJSON(['ok' => true, 'id' => $newId]);
     }
 
-    /** QR por ID */
-    public function qr($id = null)
+    /* =================== Status/QR/Reset/Logout =================== */
+
+    /** RESET: apaga credenciais e sobe novamente (gera novo QR) */
+    public function reset($id = null)
     {
-        $id = (int) $id;
+        $id  = (int) $id;
         $row = $this->findInstanceById($id);
-        if (!$row) return $this->response->setStatusCode(404);
+        if (!$row) {
+            return $this->response->setStatusCode(404)->setJSON(['ok'=>false,'msg'=>'instância não encontrada']);
+        }
+        $sid = (string) ($row['sid'] ?? '');
+        if ($sid === '') {
+            return $this->response->setStatusCode(422)->setJSON(['ok'=>false,'msg'=>'instância sem sid']);
+        }
 
-        $url = "https://api.ultramsg.com/{$row['instance_id']}/instance/qr?token=" . rawurlencode($row['token']);
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 15,
-        ]);
-        $img = curl_exec($ch);
-        curl_close($ch);
+        // chama /session/:sid/reset no gateway
+        $r = $this->gwCall('POST', "/session/{$sid}/reset");
+        if (!$r['ok']) {
+            return $this->response->setStatusCode(502)->setJSON([
+                'ok'=>false,
+                'err'=>$r['err'] ?? 'gateway error',
+                'raw'=>$r['json'] ?? ($r['raw'] ?? null),
+            ]);
+        }
 
-        if ($img === false) return $this->response->setStatusCode(502);
-
+        // limpa status local para forçar novo QR na UI
         \Config\Database::connect()->table('whatsapp_instancias')
             ->where('id', $row['id'])
-            ->update(['last_qr_at'=>date('Y-m-d H:i:s')]);
+            ->update([
+                'conn_status'    => 'qr',
+                'conn_substatus' => 'reset',
+                'updated_at'     => date('Y-m-d H:i:s'),
+            ]);
 
-        return $this->response->setHeader('Content-Type','image/png')->setBody($img);
+        return $this->response->setJSON(['ok'=>true]);
     }
 
-    /** Status por ID */
+    /** STATUS: expõe status + último erro (com autoheal=1) */
     public function status($id = null)
     {
-        $id = (int) $id;
+        $id  = (int) $id;
         $row = $this->findInstanceById($id);
-        if (!$row) return $this->response->setStatusCode(404)->setJSON(['ok'=>false,'msg'=>'instância não encontrada']);
+        if (!$row) {
+            return $this->response->setStatusCode(404)->setJSON(['ok' => false, 'msg' => 'instância não encontrada']);
+        }
 
-        $url = "https://api.ultramsg.com/{$row['instance_id']}/instance/status?token=" . rawurlencode($row['token']);
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 15,
-        ]);
-        $json = curl_exec($ch);
-        curl_close($ch);
+        $sid = (string) ($row['sid'] ?? '');
+        if ($sid === '') {
+            return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'msg' => 'instância sem sid']);
+        }
 
-        $data = json_decode($json, true) ?: [];
+        $r = $this->gwCall('GET', "/session/{$sid}/status", ['autoheal' => 1]);
+        if (!$r['ok']) {
+            return $this->response->setStatusCode(502)->setJSON([
+                'ok'     => false,
+                'status' => 'unknown',
+                'raw'    => $r['json'] ?? ($r['raw'] ?? null),
+                'err'    => $r['err'] ?? 'gateway error',
+            ]);
+        }
 
-        [$status, $statusText, $statusNote] = $this->parseUltraStatus($data);
-
-        // tentativa de extrair número da linha do payload (opcional, depende da UltraMSG)
-        $linhaDetectada = null;
-        // exemplos de lugares possíveis (ajuste conforme seu retorno real):
-        if (isset($data['wid'])) $linhaDetectada = $this->digits($data['wid']);
-        if (!$linhaDetectada && isset($data['phone'])) $linhaDetectada = $this->digits($data['phone']);
-        if (!$linhaDetectada && isset($data['status']['wid'])) $linhaDetectada = $this->digits($data['status']['wid']);
+        $json     = $r['json'] ?? [];
+        $status   = (string) ($json['status'] ?? 'unknown');
+        $msisdn   = preg_replace('/\D+/', '', (string) ($json['msisdn'] ?? ''));
+        $lastErr  = $json['lastError'] ?? null;
 
         $upd = [
             'conn_status'    => $status,
-            'conn_substatus' => $statusText,
-            'status_note'    => $statusNote,
-            'status_raw'     => $json,
             'last_status_at' => date('Y-m-d H:i:s'),
             'updated_at'     => date('Y-m-d H:i:s'),
         ];
-        if ($linhaDetectada && empty($row['linha_msisdn'])) {
-            $upd['linha_msisdn'] = $linhaDetectada;
-        }
+        if ($msisdn && empty($row['linha_msisdn'])) $upd['linha_msisdn'] = $msisdn;
 
         \Config\Database::connect()->table('whatsapp_instancias')
             ->where('id', $row['id'])
             ->update($upd);
 
-        return $this->response->setJSON([
-            'ok'     => true,
-            'status' => $status ?? 'unknown',
-            'raw'    => $data,
-        ]);
+        return $this->response->setJSON(['ok' => true, 'status' => $status, 'raw' => $json, 'lastError' => $lastErr]);
     }
 
-    /** Logout */
+    /** QR: proxy do QR do gateway (svg/png ou json) */
+    public function qr($id = null)
+    {
+        $id  = (int) $id;
+        $row = $this->findInstanceById($id);
+        if (!$row) {
+            return $this->response->setStatusCode(404);
+        }
+
+        $sid = (string) ($row['sid'] ?? '');
+        if ($sid === '') {
+            return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'msg' => 'instância sem sid']);
+        }
+
+        // 1) tenta stream do SVG do gateway
+        try {
+            $base   = rtrim((string) env('GATEWAY_URL'), '/');
+            $key    = (string) env('GATEWAY_KEY');
+            $client = \Config\Services::curlrequest();
+
+            $res = $client->get($base . "/session/{$sid}/qr.svg", [
+                'http_errors' => false,
+                'headers'     => ['x-api-key' => $key],
+                'timeout'     => 15,
+            ]);
+
+            if ($res->getStatusCode() === 200
+                && stripos($res->getHeaderLine('Content-Type'), 'image/svg') !== false) {
+
+                \Config\Database::connect()->table('whatsapp_instancias')
+                    ->where('id', $row['id'])
+                    ->update(['last_qr_at' => date('Y-m-d H:i:s')]);
+
+                return $this->response
+                    ->setHeader('Content-Type', 'image/svg+xml')
+                    ->setBody((string) $res->getBody());
+            }
+        } catch (\Throwable $e) {
+            // fallback
+        }
+
+        // 2) fallback JSON { qr: data:image/... }
+        $r = $this->gwCall('GET', "/session/{$sid}/qr");
+        if (!$r['ok']) {
+            return $this->response->setStatusCode(502)->setJSON([
+                'ok'  => false,
+                'err' => $r['err'] ?? 'gateway error',
+                'raw' => $r['json'] ?? ($r['raw'] ?? null),
+            ]);
+        }
+
+        $json = $r['json'] ?? [];
+        $qr   = (string) ($json['qr'] ?? '');
+        if (strpos($qr, 'data:image') === 0) {
+            $b64 = preg_replace('#^data:image/\w+;base64,#', '', $qr);
+            $png = base64_decode($b64);
+            if ($png !== false) {
+                \Config\Database::connect()->table('whatsapp_instancias')
+                    ->where('id', $row['id'])
+                    ->update(['last_qr_at' => date('Y-m-d H:i:s')]);
+
+                return $this->response->setHeader('Content-Type', 'image/png')->setBody($png);
+            }
+        }
+
+        return $this->response->setJSON($json + ['ok' => true]);
+    }
+
+    /** Força logout total no gateway e zera status local */
     public function logout($id = null)
     {
         $id  = (int) $id;
         $row = $this->findInstanceById($id);
-        if (!$row) return $this->response->setStatusCode(404)->setJSON(['ok'=>false]);
+        if (!$row) {
+            return $this->response->setStatusCode(404)->setJSON(['ok' => false, 'msg' => 'instância não encontrada']);
+        }
 
-        $url = "https://api.ultramsg.com/{$row['instance_id']}/instance/logout";
-        $ch  = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST           => true,
-            CURLOPT_POSTFIELDS     => http_build_query(['token' => $row['token']]),
-            CURLOPT_TIMEOUT        => 15,
-        ]);
-        $res = curl_exec($ch);
-        curl_close($ch);
+        $sid = (string) ($row['sid'] ?? '');
+        if ($sid === '') {
+            return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'msg' => 'instância sem sid']);
+        }
+
+        $r = $this->gwCall('DELETE', "/session/{$sid}");
+        if (!$r['ok']) {
+            return $this->response->setStatusCode(502)->setJSON([
+                'ok'  => false,
+                'err' => $r['err'] ?? 'gateway error',
+                'raw' => $r['json'] ?? ($r['raw'] ?? null),
+            ]);
+        }
 
         \Config\Database::connect()->table('whatsapp_instancias')
             ->where('id', $row['id'])
@@ -245,37 +500,31 @@ class Whatsapp extends BaseController
                 'updated_at'     => date('Y-m-d H:i:s'),
             ]);
 
-        return $this->response->setJSON(['ok'=>true, 'resp'=>json_decode($res,true)]);
+        return $this->response->setJSON(['ok' => true]);
     }
 
-    /** Settings webhook */
+    /* =================== Webhook (UI) =================== */
+
+    /**
+     * Persiste o webhook na tabela e também envia pro gateway por sessão.
+     */
     public function setWebhook($id = null)
     {
         $id  = (int) $id;
         $row = $this->findInstanceById($id);
-        if (!$row) return $this->response->setStatusCode(404)->setJSON(['ok'=>false,'msg'=>'instância não encontrada']);
+        if (!$row) {
+            return $this->response->setStatusCode(404)->setJSON(['ok' => false, 'msg' => 'instância não encontrada']);
+        }
 
         $hook = (string) $this->request->getPost('webhook_url');
-        if (!$hook) return $this->response->setStatusCode(422)->setJSON(['ok'=>false,'msg'=>'webhook_url obrigatório']);
+        if (!$hook) {
+            return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'msg' => 'webhook_url obrigatório']);
+        }
 
-        $url = "https://api.ultramsg.com/{$row['instance_id']}/instance/settings";
-        $payload = [
-            'token'                    => $row['token'],
-            'webhook_url'              => $hook,
-            'webhook_message_received' => 'on',
-            'webhook_message_create'   => 'on',
-            'webhook_message_ack'      => 'on',
-        ];
-
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST           => true,
-            CURLOPT_POSTFIELDS     => http_build_query($payload),
-            CURLOPT_TIMEOUT        => 15,
-        ]);
-        $res = curl_exec($ch);
-        curl_close($ch);
+        $sid = (string) ($row['sid'] ?? $row['instance_id'] ?? '');
+        if ($sid !== '') {
+            $this->gwCall('POST', "/session/{$sid}/webhook", ['webhook_url' => $hook]);
+        }
 
         \Config\Database::connect()->table('whatsapp_instancias')
             ->where('id', $row['id'])
@@ -284,61 +533,37 @@ class Whatsapp extends BaseController
                 'updated_at'  => date('Y-m-d H:i:s'),
             ]);
 
-        return $this->response->setJSON(['ok'=>true, 'resp'=>json_decode($res,true)]);
+        return $this->response->setJSON(['ok' => true]);
     }
 
-    /** Remover instância */
+    /* =================== Excluir instância =================== */
+
     public function delete($id)
     {
         $id = (int) $id;
 
         $model    = new \App\Models\WhatsappInstanceModel();
         $instance = $model->where('id', $id)
-                          ->where('usuario_id', (int) session('usuario_id'))
-                          ->first();
+            ->where('usuario_id', (int) session('usuario_id'))
+            ->first();
 
         if (!$instance) {
             return $this->response->setStatusCode(404)->setJSON([
                 'status'  => 'error',
-                'message' => 'Instância não encontrada'
+                'message' => 'Instância não encontrada',
             ]);
         }
 
-        $client = \Config\Services::curlrequest();
-
-        // Reset na UltraMSG (API oficial)
-        try {
-            $ultraUrl  = "https://api.ultramsg.com/{$instance['instance_id']}/instance/clear";
-            $response  = $client->post($ultraUrl, [
-                'form_params' => ['token' => $instance['token']],
-                'timeout'     => 20,
-            ]);
-            $status    = $response->getStatusCode();
-            $bodyStr   = (string) $response->getBody();
-            $resBody   = json_decode($bodyStr, true);
-
-            if ($status < 200 || $status >= 300) {
-                return $this->response->setStatusCode(502)->setJSON([
-                    'status'  => 'error',
-                    'message' => 'Falha ao resetar a instância na UltraMSG',
-                    'ultramsg_response' => $resBody ?: $bodyStr,
-                ]);
-            }
-        } catch (\Throwable $e) {
-            return $this->response->setStatusCode(500)->setJSON([
-                'status'  => 'error',
-                'message' => 'Erro ao resetar na UltraMSG: ' . $e->getMessage()
-            ]);
+        $sid = (string) ($instance['sid'] ?? $instance['instance_id'] ?? '');
+        if ($sid !== '') {
+            $this->gwCall('DELETE', "/session/{$sid}");
         }
 
-        // Remove local
         $model->delete($id);
 
         return $this->response->setJSON([
-            'status'            => 'success',
-            'message'           => 'Instância resetada na UltraMSG e removida localmente',
-            'ultramsg_response' => $resBody ?? null,
-            'endpoint_used'     => 'POST /instance/clear'
+            'status'  => 'success',
+            'message' => 'Instância removida e sessão encerrada no gateway',
         ]);
     }
 }

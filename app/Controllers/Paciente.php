@@ -18,6 +18,51 @@ class Paciente extends Controller
         $this->assinanteId = (int) (session()->get('assinante_id') ?? 0) ?: 1;
     }
 
+    /** ========== Helpers de etapas válidas ========== */
+
+    private function etapasValidasDoAssinante(int $assinanteId): array
+    {
+        $configIaModel = new ConfigIaModel();
+        $rows = $configIaModel
+            ->where('assinante_id', $assinanteId)
+            ->orderBy('id', 'ASC')
+            ->findAll();
+
+        $validas = [];
+        foreach ($rows as $r) {
+            $e = trim((string)($r['etapa_atual'] ?? ''));
+            if ($e !== '') $validas[$e] = true;
+        }
+        return array_keys($validas);
+    }
+
+    /**
+     * Devolve uma etapa válida para o assinante:
+     * - se $desejada for válida, retorna ela;
+     * - senão, retorna a primeira válida;
+     * - se não existir nenhuma etapa válida, retorna null.
+     */
+    private function coerceEtapaValida(?string $desejada): ?string
+    {
+        $validas = $this->etapasValidasDoAssinante($this->assinanteId);
+        if (empty($validas)) return null;
+
+        $d = trim((string)($desejada ?? ''));
+        if ($d !== '' && in_array($d, $validas, true)) return $d;
+
+        // primeira válida do assinante
+        return $validas[0] ?? null;
+    }
+
+    private function normalizePhone(string $raw): string
+    {
+        $raw = trim($raw);
+        if ($raw === '') return '';
+        return preg_replace('/\D+/', '', $raw) ?? '';
+    }
+
+    /* ==================== Páginas ==================== */
+
     public function index()
     {
         // if (!$this->usuarioId) return redirect()->to('/login');
@@ -26,20 +71,14 @@ class Paciente extends Controller
 
         $builder = $db->table('pacientes p')
             ->select('p.*, s.etapa')
-            ->join('sessoes s', 's.numero = p.telefone', 'left')
+            ->join('sessoes s', 's.numero = p.telefone AND s.usuario_id = p.usuario_id', 'left')
             ->where('p.usuario_id', $this->usuarioId)
             ->orderBy('p.ultimo_contato', 'DESC');
 
-        // Etapas do assinante
-        $configIaModel = new ConfigIaModel();
-        $resultados = $configIaModel
-            ->where('assinante_id', $this->assinanteId)
-            ->orderBy('id', 'ASC')
-            ->findAll();
-
+        // Etapas do assinante (apenas as válidas)
+        $etapasValidas = $this->etapasValidasDoAssinante($this->assinanteId);
         $etapas = [];
-        foreach ($resultados as $linha) {
-            $etapa = (string)$linha['etapa_atual'];
+        foreach ($etapasValidas as $etapa) {
             $etapas[$etapa] = ucfirst(str_replace('_', ' ', $etapa));
         }
 
@@ -71,19 +110,25 @@ class Paciente extends Controller
         // Inputs
         $nome     = trim((string)$this->request->getPost('nome'));
         $telefone = $this->normalizePhone((string)$this->request->getPost('telefone'));
-        $etapa    = trim((string)$this->request->getPost('etapa'));
+        $etapaIn  = trim((string)$this->request->getPost('etapa'));
 
         if ($nome === '' || $telefone === '') {
             return redirect()->to('/paciente')->with('errors', ['valid' => 'Nome e telefone são obrigatórios.'])->withInput();
         }
 
-        // Etapa deve existir para o assinante
-        if ($etapa !== '') {
+        // Se foi escolhida, precisa ser válida; se não foi escolhida, vamos "coagir" para uma válida
+        if ($etapaIn !== '') {
             $stage = $configIaModel->where('assinante_id', $this->assinanteId)
-                                   ->where('etapa_atual', $etapa)
+                                   ->where('etapa_atual', $etapaIn)
                                    ->first();
             if (!$stage) {
                 return redirect()->to('/paciente')->with('errors', ['stage' => 'Etapa inválida para este assinante.'])->withInput();
+            }
+            $etapaParaSalvar = $etapaIn; // garantidamente válida
+        } else {
+            $etapaParaSalvar = $this->coerceEtapaValida(null);
+            if ($etapaParaSalvar === null) {
+                return redirect()->to('/paciente')->with('errors', ['stage' => 'Nenhuma etapa configurada para este assinante. Configure etapas em Config IA.']);
             }
         }
 
@@ -104,12 +149,16 @@ class Paciente extends Controller
         // Se trocou o número
         if ($telAntigo !== '' && $telNovo !== '' && $telAntigo !== $telNovo) {
             // Adota/cria nova sessão
-            $sessNova = $db->table('sessoes')->where('numero', $telNovo)->get()->getFirstRow('array');
+            $sessNova = $db->table('sessoes')
+                ->where('numero', $telNovo)
+                ->get()->getFirstRow('array');
+
             if (!$sessNova) {
+                // cria SEMPRE com etapa válida
                 $db->table('sessoes')->insert([
                     'numero'     => $telNovo,
                     'usuario_id' => $this->usuarioId,
-                    'etapa'      => $etapa ?: 'entrada',
+                    'etapa'      => $etapaParaSalvar,
                     'historico'  => json_encode([], JSON_UNESCAPED_UNICODE),
                 ]);
             } else {
@@ -118,9 +167,10 @@ class Paciente extends Controller
                     $db->transRollback();
                     return redirect()->to('/paciente')->with('errors', ['perm' => 'Número já vinculado a outro usuário.']);
                 }
+                // atualiza etapa apenas com válida
                 $db->table('sessoes')->where('numero', $telNovo)->update([
                     'usuario_id' => $this->usuarioId,
-                    'etapa'      => $etapa ?: ($sessNova['etapa'] ?? 'entrada'),
+                    'etapa'      => $etapaParaSalvar,
                 ]);
             }
 
@@ -130,13 +180,13 @@ class Paciente extends Controller
                 $db->table('sessoes')->where('numero', $telAntigo)->delete();
             }
         } else {
-            // Mesmo número -> atualiza/insere sessão
+            // Mesmo número -> atualiza/insere sessão com etapa válida
             $sess = $db->table('sessoes')->where('numero', $telNovo)->get()->getFirstRow('array');
             if (!$sess) {
                 $db->table('sessoes')->insert([
                     'numero'     => $telNovo,
                     'usuario_id' => $this->usuarioId,
-                    'etapa'      => $etapa ?: 'entrada',
+                    'etapa'      => $etapaParaSalvar,
                     'historico'  => json_encode([], JSON_UNESCAPED_UNICODE),
                 ]);
             } else {
@@ -144,9 +194,11 @@ class Paciente extends Controller
                     $db->transRollback();
                     return redirect()->to('/paciente')->with('errors', ['perm' => 'Sem permissão para alterar esta sessão.']);
                 }
-                $payload = ['usuario_id' => $this->usuarioId];
-                if ($etapa !== '') $payload['etapa'] = $etapa;
-                $db->table('sessoes')->where('numero', $telNovo)->update($payload);
+                $db->table('sessoes')->where('numero', $telNovo)->update([
+                    'usuario_id' => $this->usuarioId,
+                    // só atualiza etapa se veio no POST; se não veio, mantém a atual (mas ela já deve ser válida de interações anteriores)
+                    'etapa'      => $etapaIn !== '' ? $etapaParaSalvar : $sess['etapa'],
+                ]);
             }
         }
 
@@ -194,15 +246,5 @@ class Paciente extends Controller
         $db->transCommit();
 
         return redirect()->to('/paciente')->with('msg', 'Paciente excluído!');
-    }
-
-    /* ==================== HELPERS ==================== */
-
-    private function normalizePhone(string $raw): string
-    {
-        $raw = trim($raw);
-        if ($raw === '') return '';
-        // somente dígitos (se usa E.164 com +, adapte aqui)
-        return preg_replace('/\D+/', '', $raw) ?? '';
     }
 }

@@ -166,3 +166,19 @@ $routes->group('tarefas', static function ($r) {
     $r->post('ordenar', 'Tarefas::ordenar');
 });
 
+$routes->group('', ['namespace' => 'App\Controllers'], static function($r) {
+    // Painel/integração
+    $r->post('whatsapp/gw', 'Whatsapp::gw');
+    $r->post('whatsapp/bind', 'Whatsapp::bind');
+    $r->post('whatsapp/reset/(:num)', 'Whatsapp::reset/$1');
+    $r->get('whatsapp/status/(:num)', 'Whatsapp::status/$1');
+    $r->get('whatsapp/qr/(:num)', 'Whatsapp::qr/$1');
+    $r->post('whatsapp/set-webhook/(:num)', 'Whatsapp::setWebhook/$1');
+    $r->delete('whatsapp/delete/(:num)', 'Whatsapp::delete/$1');
+
+    // **Webhook** que o Node chama
+    $r->post('webhook-sessao/receive', 'WebhookSessao::receive');
+    // (se quiser usar o controlador “Webhook” mais completo)
+    $r->post('webhook', 'Webhook::index');
+});
+
