@@ -50,59 +50,18 @@ class Filters extends BaseFilters
      *  - CORS antes (evita bloquear preflight OPTIONS)
      *  - CSRF NÃO fica mais aqui: moveremos para $methods (POST/PUT/PATCH/DELETE)
      */
-public array $globals = [
-    'before' => [
-        // 🔓 HOTFIX: mantém CSRF, mas exclui grupos inteiros de rotas “AJAX”
-        'csrf' => [
-            'except' => [
-                // Webhooks
-                'webhook',
-                'webhook/*',
-                'webhook-sessao/receive',
-                'webhook-sessao/*',
-
-                // WhatsApp gateway
-                'whatsapp/*',
-
-                // APIs/AJAX da sua aplicação (libera de CSRF enquanto organizamos tokens)
-                'api',
-                'api/*',
-                'kanban',
-                'kanban/*',
-                'chat',
-                'chat/*',
-                'tarefas',
-                'tarefas/*',
-                'paciente',
-                'paciente/*',
-                'agendamentos',
-                'agendamentos/*',
-                'notificacoes',
-                'notificacoes/*',
-                'configuracaoia',
-                'configuracaoia/*',
-                'painel',
-                'painel/*',
-
-                // uploads
-                'upload',
-                'upload/*',
-                'kanban/lead-files',
-                'kanban/lead-files/*',
-            ],
+    public array $globals = [
+        'before' => [
+            'cors',
+            // Se quiser, pode manter honeypot/invchars aqui:
+            // 'honeypot',
+            // 'invalidchars',
         ],
-
-        // (opcional) se o FORCE HTTPS te atrapalhar em dev local, comenta:
-        // 'forcehttps',
-        // 'pagecache',
-    ],
-    'after' => [
-        // 'pagecache',
-        // 'performance',
-        // 'toolbar',
-    ],
-];
-
+        'after' => [
+            'secureheaders',
+            // 'toolbar',
+        ],
+    ];
 
     /**
      * Aplique CSRF **somente** em métodos que modificam estado.

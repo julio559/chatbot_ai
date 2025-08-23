@@ -22,6 +22,7 @@
     }
   </script>
   <style>
+    html, body { height: 100%; }
     .scroll-smooth { scroll-behavior: smooth; }
     .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .fade-enter { opacity: 0; transform: translateY(6px); }
@@ -33,12 +34,12 @@
     #fileModal.flex .modal-card{opacity:1; transform:none;}
   </style>
 </head>
-<body class="bg-slate-50 text-slate-800">
-  <div class="min-h-screen flex">
+<body class="bg-slate-50 text-slate-800 h-screen overflow-hidden">
+  <div class="h-full flex min-h-0">
 
     <?= view('sidebar') ?>
 
-    <main class="flex-1 flex flex-col">
+    <main class="flex-1 flex flex-col min-h-0">
       <!-- Header -->
       <header class="p-4 bg-gradient-to-r from-slate-900 to-ocean-600 text-white">
         <div class="flex items-center justify-between gap-3">
@@ -50,9 +51,9 @@
         </div>
       </header>
 
-      <section class="flex-1 flex">
+      <section class="flex-1 flex min-h-0">
         <!-- Lista de contatos -->
-        <aside class="w-80 bg-white border-r border-slate-200 flex flex-col">
+        <aside class="w-80 bg-white border-r border-slate-200 flex flex-col min-h-0">
           <div class="p-4 border-b border-slate-200">
             <h2 class="font-semibold text-lg">Contatos</h2>
             <div class="relative mt-3">
@@ -66,7 +67,7 @@
         </aside>
 
         <!-- Janela de chat -->
-        <section class="flex-1 flex flex-col">
+        <section class="flex-1 flex flex-col min-h-0">
           <div class="p-4 bg-white border-b flex items-center justify-between">
             <div class="min-w-0">
               <h3 id="chatTitle" class="font-semibold text-lg ellipsis">Selecione um contato</h3>
@@ -84,7 +85,9 @@
           <!-- Barra de envio -->
           <form id="sendForm" class="p-4 bg-white border-t flex items-end gap-3" onsubmit="return false;">
             <div class="flex-1">
-              <textarea id="msgInput" rows="1" placeholder="Digite uma mensagem..." class="w-full rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-ocean-600 resize-none disabled:opacity-50" disabled></textarea>
+              <textarea id="msgInput" rows="1" placeholder="Digite uma mensagem..."
+                        class="w-full rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-ocean-600 resize-none disabled:opacity-50 max-h-40 overflow-y-auto"
+                        disabled></textarea>
               <div id="typing" class="hidden mt-1 text-xs text-slate-400">Digitando…</div>
             </div>
             <button id="sendBtn" class="px-5 py-2 rounded-xl bg-ocean-600 text-white font-medium disabled:opacity-50" disabled>Enviar</button>
@@ -92,7 +95,7 @@
         </section>
 
         <!-- Painel lateral: fechado por padrão -->
-        <aside id="infoPanel" class="w-80 bg-white border-l border-slate-200 flex-col hidden">
+        <aside id="infoPanel" class="w-80 bg-white border-l border-slate-200 flex-col hidden min-h-0">
           <div class="p-4 border-b">
             <div class="flex items-center justify-between">
               <h3 class="font-semibold">Detalhes</h3>
@@ -306,9 +309,9 @@ async function refreshMessages(){
   }catch(e){ console.error(e); }
 }
 
-// Auto-expand do textarea
+// Auto-expand do textarea sem quebrar layout
 const ta = document.getElementById('msgInput');
-function autoGrow(){ this.style.height = 'auto'; this.style.height = (this.scrollHeight)+ 'px'; }
+function autoGrow(){ this.style.height = 'auto'; this.style.height = Math.min(this.scrollHeight, 160) + 'px'; }
 ta?.addEventListener('input', autoGrow);
 
 document.getElementById('sendBtn').addEventListener('click', sendMessage);
