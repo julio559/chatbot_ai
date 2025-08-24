@@ -44,7 +44,7 @@ class Webhook extends ResourceController
             ->limit(1)->get()->getRowArray();
         if ($row) return $row;
 
-        // sufixos
+        // sufixos (remove 1…2 dígitos finais)
         if (strlen($num) >= 12) {
             $r1 = substr($num, 0, -1);
             $row = $db->table('whatsapp_instancias')->where('linha_msisdn', $r1)->limit(1)->get()->getRowArray();
@@ -81,40 +81,40 @@ class Webhook extends ResourceController
 
         $inst = $this->obterInstanciaDaLinha($nossoNumero);
         if ($inst && !empty($inst['usuario_id'])) {
-            $u = $db->table('usuarios')->select('id, assinante_id')
+            $u = $db->table('usuarios')->select('id, assinante_id, nome')
                 ->where('id', (int) $inst['usuario_id'])->get()->getRowArray();
-            if ($u) return [(int) $u['id'], (int) $u['assinante_id']];
+            if ($u) return [(int) $u['id'], (int) $u['assinante_id'], (string) ($u['nome'] ?? '')];
         }
 
         if ($sid) {
             $instBySid = $db->table('whatsapp_instancias')->where('sid', $sid)->get()->getRowArray();
             if ($instBySid && !empty($instBySid['usuario_id'])) {
                 $usuarioId = (int) $instBySid['usuario_id'];
-                $u = $db->table('usuarios')->select('assinante_id')->where('id', $usuarioId)->get()->getRowArray();
-                if ($u) return [$usuarioId, (int) $u['assinante_id']];
+                $u = $db->table('usuarios')->select('assinante_id, nome')->where('id', $usuarioId)->get()->getRowArray();
+                if ($u) return [$usuarioId, (int) $u['assinante_id'], (string) ($u['nome'] ?? '')];
             }
         }
 
         // fallback por telefone principal do usuário
         $num = $this->soDigitos($nossoNumero);
-        $u = $db->table('usuarios')->where('telefone_principal', $num)->get()->getRowArray();
-        if ($u) return [(int) $u['id'], (int) $u['assinante_id']];
+        $u = $db->table('usuarios')->select('id, assinante_id, nome')->where('telefone_principal', $num)->get()->getRowArray();
+        if ($u) return [(int) $u['id'], (int) $u['assinante_id'], (string) ($u['nome'] ?? '')];
 
         $len = strlen($num);
         for ($take = 11; $take >= 8; $take--) {
             if ($len < $take) continue;
             $suf = substr($num, -$take);
             $u = $db->query(
-                "SELECT id, assinante_id FROM usuarios
+                "SELECT id, assinante_id, nome FROM usuarios
                   WHERE telefone_principal LIKE CONCAT('%', ?)
               ORDER BY LENGTH(telefone_principal) DESC
                  LIMIT 1",
                 [$suf]
             )->getRowArray();
-            if ($u) return [(int) $u['id'], (int) $u['assinante_id']];
+            if ($u) return [(int) $u['id'], (int) $u['assinante_id'], (string) ($u['nome'] ?? '')];
         }
 
-        return [null, null];
+        return [null, null, ''];
     }
 
     /** evita eco: número pertence a alguma instância do usuário */
@@ -203,13 +203,6 @@ class Webhook extends ResourceController
         return array_keys($ok);
     }
 
-    /**
-     * Retorna uma etapa válida:
-     * - se $desejada é válida, retorna;
-     * - senão, retorna $fallbackSeValido se for válido;
-     * - senão, retorna primeira válida;
-     * - se não houver válidas, retorna null.
-     */
     private function coerceEtapaValidaAssinante(int $assinanteId, ?string $desejada, ?string $fallbackSeValido = null): ?string
     {
         $validas = $this->etapasValidasDoAssinante($assinanteId);
@@ -234,11 +227,7 @@ class Webhook extends ResourceController
         return (bool) $row;
     }
 
-    /**
-     * Atualiza sessão com proteção:
-     * - `novaEtapa` pode ser null: não altera etapa
-     * - `linha_numero` só grava se existir em usuarios_numeros
-     */
+    /** Atualiza sessão com proteção */
     private function moverSessaoParaEtapa(
         SessaoModel $sessaoModel,
         string $numero,
@@ -394,6 +383,26 @@ class Webhook extends ResourceController
         return [$p1, trim($p2)];
     }
 
+    /* ====== Helpers que faltavam (evita 500) ====== */
+
+    /** Loga a mensagem no feed (sem depender de tabela específica) */
+    private function salvarMensagemChat(string $numero, string $role, string $mensagem, string $canalLinha, int $usuarioId): void
+    {
+        log_message('info', sprintf(
+            'CHAT [%s] usuario=%d numero=%s role=%s msg="%s"',
+            $canalLinha, $usuarioId, $numero, $role, mb_substr($mensagem, 0, 500)
+        ));
+    }
+
+    /**
+     * TRUE se um humano falou há pouco (para silenciar a IA).
+     * Implementação mínima: FALSE (não bloqueia seu fluxo).
+     */
+    private function humanoMandouRecentemente(int $usuarioId, string $numero, string $canalLinha, int $segundos): bool
+    {
+        return false;
+    }
+
     /* ============================ Webhook ============================ */
 
     public function index()
@@ -458,11 +467,12 @@ class Webhook extends ResourceController
                 return $this->respond(['ignorado' => 'duplicado (gateway)'], 200);
             }
 
-            // Dono (por linha, com fallback por SID)
-            [$usuarioId, $assinanteId] = $this->encontrarDono($nossoNumero, $sid);
+            // Dono (por linha, com fallback por SID) + nome do usuário dono da instância
+            [$usuarioId, $assinanteId, $usuarioNome] = $this->encontrarDono($nossoNumero, $sid);
             if (!$usuarioId || !$assinanteId) {
                 return $this->respond(['ignorado' => 'linha sem dono'], 200);
             }
+            $usuarioNome = trim($usuarioNome) !== '' ? $usuarioNome : 'Clínica';
 
             $canalBase  = 'whatsapp';
             $canalLinha = $canalBase . ':' . $nossoNumero;
@@ -481,7 +491,6 @@ class Webhook extends ResourceController
                 }
 
                 $extras = ['ultima_resposta_ia' => null, 'data_atualizacao' => date('Y-m-d H:i:s')];
-                // etapa 'humano' só se for válida; senão, não muda etapa
                 $etapaHumano = $this->coerceEtapaValidaAssinante($assinanteId, 'humano', null);
                 $this->moverSessaoParaEtapa($sessaoModel, $numero, $usuarioId, $etapaHumano, $extras);
                 $this->salvarMensagemChat($numero, 'humano', $mensagem, $canalLinha, $usuarioId);
@@ -490,6 +499,7 @@ class Webhook extends ResourceController
 
             /* ===== inbound (lead) ===== */
 
+            // evita criar paciente para a própria linha/instância
             if ($this->ehNumeroDeInstanciaDoUsuario($usuarioId, $numero)) {
                 $this->salvarMensagemChat($numero, 'user', $mensagem, $canalLinha, $usuarioId);
                 return $this->respond(['ignorado' => 'mensagem da própria linha/instância'], 200);
@@ -553,7 +563,7 @@ class Webhook extends ResourceController
 
                 $historicoCompleto[] = ['role' => 'user', 'content' => $mensagem, 'linha' => $nossoNumero];
 
-                $etapaNova = $this->coerceEtapaValidaAssinante($assinanteId, 'entrada', $etapaAtual ?: null); // só válida
+                $etapaNova = $this->coerceEtapaValidaAssinante($assinanteId, 'entrada', $etapaAtual ?: null);
                 if ($reply !== '') {
                     $historicoCompleto[] = ['role' => 'assistant', 'content' => $reply, 'linha' => $nossoNumero];
                 }
@@ -607,6 +617,8 @@ class Webhook extends ResourceController
                 'max_tokens'          => 220,
                 'responder_permitido' => true,
                 'linha_atual'         => $nossoNumero,
+                // 👉 envia o nome do dono/usuário da instância:
+                'dono_usuario_nome'   => $usuarioNome,
             ]);
 
             if (!is_array($estruturada) || !($estruturada['ok'] ?? false)) {
@@ -625,7 +637,7 @@ class Webhook extends ResourceController
             $confianca  = (float)  ($estruturada['confianca'] ?? 0.0);
 
             // Decide etapa final sempre válida
-            $desejada = $moverAgora || $confianca >= 0.5 ? $etapaAI : $etapaAtual;
+            $desejada   = $moverAgora || $confianca >= 0.5 ? $etapaAI : $etapaAtual;
             $etapaFinal = $this->coerceEtapaValidaAssinante($assinanteId, $desejada, $etapaAtual ?: null);
 
             if ($reply !== '') {

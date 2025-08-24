@@ -4,7 +4,6 @@ namespace Config;
 
 use CodeIgniter\Config\Filters as BaseFilters;
 use CodeIgniter\Filters\Cors;
-use CodeIgniter\Filters\CSRF;
 use CodeIgniter\Filters\DebugToolbar;
 use CodeIgniter\Filters\ForceHTTPS;
 use CodeIgniter\Filters\Honeypot;
@@ -16,7 +15,7 @@ use CodeIgniter\Filters\SecureHeaders;
 class Filters extends BaseFilters
 {
     public array $aliases = [
-        'csrf'          => CSRF::class,
+        // sem 'csrf' aqui
         'toolbar'       => DebugToolbar::class,
         'honeypot'      => Honeypot::class,
         'invalidchars'  => InvalidChars::class,
@@ -25,129 +24,37 @@ class Filters extends BaseFilters
         'forcehttps'    => ForceHTTPS::class,
         'pagecache'     => PageCache::class,
         'performance'   => PerformanceMetrics::class,
-
-        // filtro de autenticação da sua app (se houver)
         'auth'          => \App\Filters\AuthFilter::class,
     ];
 
-    /**
-     * Não force pagecache/https "antes" — isso costuma quebrar dev/local.
-     * Deixe o CORS sempre "before" e headers seguros "after".
-     */
     public array $required = [
         'before' => [
-            // 'forcehttps',   // habilite em produção se tiver HTTPS configurado
+            // 'forcehttps',
         ],
         'after'  => [
-            // 'pagecache',   // se usar cache de página, ative aqui com cuidado
+            // 'pagecache',
             // 'performance',
-            // 'toolbar',     // útil em dev
+            // 'toolbar',
         ],
     ];
 
-    /**
-     * Globais:
-     *  - CORS antes (evita bloquear preflight OPTIONS)
-     *  - CSRF NÃO fica mais aqui: moveremos para $methods (POST/PUT/PATCH/DELETE)
-     */
-public array $globals = [
-    'before' => [
-        // 🔓 HOTFIX: mantém CSRF, mas exclui grupos inteiros de rotas “AJAX”
-        'csrf' => [
-            'except' => [
-                // Webhooks
-                'webhook',
-                'webhook/*',
-                'webhook-sessao/receive',
-                'webhook-sessao/*',
-
-                // WhatsApp gateway
-                'whatsapp/*',
-
-                // APIs/AJAX da sua aplicação (libera de CSRF enquanto organizamos tokens)
-                'api',
-                'api/*',
-                'kanban',
-                'kanban/*',
-                'chat',
-                'chat/*',
-                'tarefas',
-                'tarefas/*',
-                'paciente',
-                'paciente/*',
-                'agendamentos',
-                'agendamentos/*',
-                'notificacoes',
-                'notificacoes/*',
-                'configuracaoia',
-                'configuracaoia/*',
-                'painel',
-                'painel/*',
-
-                // uploads
-                'upload',
-                'upload/*',
-                'kanban/lead-files',
-                'kanban/lead-files/*',
-            ],
+    public array $globals = [
+        'before' => [
+            'cors',
+            // nada de csrf aqui
         ],
+        'after' => [
+            // nada de csrf aqui
+        ],
+    ];
 
-        // (opcional) se o FORCE HTTPS te atrapalhar em dev local, comenta:
-        // 'forcehttps',
-        // 'pagecache',
-    ],
-    'after' => [
-        // 'pagecache',
-        // 'performance',
-        // 'toolbar',
-    ],
-];
-
-
-    /**
-     * Aplique CSRF **somente** em métodos que modificam estado.
-     * Isso evita 403 em GET/OPTIONS e libera suas rotas de listagem/busca.
-     */
+    // desliga CSRF em todos os métodos
     public array $methods = [
-        'post'   => ['csrf'],
-        'put'    => ['csrf'],
-        'patch'  => ['csrf'],
-        'delete' => ['csrf'],
+        // vazio
     ];
 
-    /**
-     * Filtros por rota. Aqui você pode:
-     *  - Exigir auth em grupos de rotas
-     *  - Adicionar exceções de CSRF para webhooks/external callbacks
-     */
     public array $filters = [
-        // Exigir auth (exemplo):
+        // nada de csrf aqui
         // 'auth' => ['before' => ['dashboard*','paciente*','kanban*','chat*','etapas*','notificacoes*','agendamentos*','whatsapp*']],
-
-        // Exceções de CSRF por rota (só onde precisar mesmo):
-        'csrf' => [
-            'before' => [
-                // Webhooks (sem CSRF, usam x-api-key, etc.)
-                'webhook',
-                'webhook/*',
-                'webhook-sessao/receive',
-                'webhook-sessao/*',
-
-                // Gateway WhatsApp
-                'whatsapp/gw',
-                'whatsapp/bind',
-                'whatsapp/reset/*',
-                'whatsapp/status/*',
-                'whatsapp/qr/*',
-                'whatsapp/set-webhook/*',
-                'whatsapp/delete/*',
-
-                // Se você NÃO enviar CSRF nesses forms especificos:
-                'paciente/atualizar',
-                'paciente/atualizar/*',
-                'paciente/excluir',
-                'paciente/excluir/*',
-            ],
-        ],
     ];
 }

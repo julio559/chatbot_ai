@@ -14,9 +14,9 @@ class OpenrouterModel extends Model
     /** Máx. de mensagens no contexto */
     private int $maxJanelaHistorico = 40;
 
-    /** Limites padrão da base de conhecimento */
-    private int $maxKbItemsDefault  = 8;
-    private int $maxKbCharsDefault  = 800;
+    /** Limites padrão da base de conhecimento (↑) */
+    private int $maxKbItemsDefault  = 30;
+    private int $maxKbCharsDefault  = 1200;
 
     public function __construct()
     {
@@ -39,15 +39,6 @@ class OpenrouterModel extends Model
 
     /**
      * Versão estruturada com controle de etapa.
-     * Retorna:
-     * [
-     *   'ok'             => bool,
-     *   'reply'          => string,
-     *   'etapa_sugerida' => string|null,
-     *   'mover_agora'    => bool,
-     *   'confianca'      => float,
-     *   'raw'            => string|null
-     * ]
      */
     public function enviarMensagemEstruturada(array $mensagens, ?string $modelo = null, array $opts = [])
     {
@@ -85,28 +76,39 @@ class OpenrouterModel extends Model
                                 : [];
         $podeResponder     = array_key_exists('responder_permitido', $opts) ? (bool) $opts['responder_permitido'] : true;
 
-        $profNome          = trim((string) ($opts['profissional_nome'] ?? ''));
-        $profTrat          = trim((string) ($opts['profissional_tratamento'] ?? 'Dra./Dr.'));
+        // Identidade via opts (pode vir do Webhook) + extração automática da base
+        $profNomeOpt       = trim((string) ($opts['profissional_nome'] ?? ''));
+        $profTratOpt       = trim((string) ($opts['profissional_tratamento'] ?? ''));
+        $donoUsuarioNome   = trim((string) ($opts['dono_usuario_nome'] ?? '')); // nome do dono da instância — vindo do Webhook
 
         $maxKbItems        = isset($opts['max_kb']) ? max(0, (int) $opts['max_kb']) : $this->maxKbItemsDefault;
         $maxKbChars        = isset($opts['max_kb_chars']) ? max(200, (int) $opts['max_kb_chars']) : $this->maxKbCharsDefault;
 
         // ---------- Inferência automática de tags ----------
-        // Se o usuário pedir "procedimentos/serviços/tratamentos", forçamos as tags relacionadas
         if ($tagsFiltro === null) {
             $textoAgregado = mb_strtolower(json_encode($mensagens, JSON_UNESCAPED_UNICODE), 'UTF-8');
-            if (preg_match('/procediment|servi[cç]o|tratament|o que a dra|o que o dr|o que a doutora|o que o doutor/u', $textoAgregado)) {
+            if (preg_match('/procediment|servi[cç]o|tratament|o que a dra|o que o dr|o que a doutora|o que o doutor|fazem|realizam|quais (s[aã]o|sao)/u', $textoAgregado)) {
                 $tagsFiltro = ['procedimentos', 'tratamentos', 'serviços', 'agenda', 'preços', 'valores'];
-                // aumentar um pouco o limite para capturar itens suficientes
-                $maxKbItems = max($maxKbItems, 10);
+                $maxKbItems = max($maxKbItems, 12);
             }
         }
 
         // --- Carrega base (curta) ---
         $kbItens  = $this->carregarAprendizagemBase($assinanteId, $tagsFiltro, $etapaFiltro, $maxKbItems, $maxKbChars);
+
+        // --- EXTRAÇÃO da identidade/procedimentos a partir da base ---
+        $ident = $this->extrairIdentidadeDaBase($kbItens);
+        $profNome = $profNomeOpt !== '' ? $profNomeOpt : ($ident['nome'] ?? '');
+        $profTrat = $profTratOpt !== '' ? $profTratOpt : ($ident['tratamento'] ?? 'Dra.');
+
+        if (!empty($ident['procedimentos'])) {
+            $uniq = array_values(array_unique($ident['procedimentos']));
+            $kbItens[] = "[Identidade] Profissional: " . (($profTrat ?: 'Dra.') . " " . ($profNome !== '' ? $profNome : 'da clínica')) .
+                         " | Procedimentos: " . implode(', ', $uniq);
+        }
+
         $kbTexto  = '';
         if (!empty($kbItens)) {
-            // Linha por item, evitando duplicações de prefixo "- "
             $linhas = array_map(function ($i) {
                 return ltrim((string) $i, "- \t");
             }, $kbItens);
@@ -131,25 +133,26 @@ class OpenrouterModel extends Model
         // ---------- Injeções de estilo/controle ----------
         $injections = [];
 
-        // Contexto operacional — identidade do profissional
+        // Contexto operacional — identidade + dono
         $contextoOp = [
             'role' => 'system',
-            'content' => (
+            'content' =>
                 "Contexto operacional:\n" .
                 "- etapas_validas: " . json_encode($etapasValidas, JSON_UNESCAPED_UNICODE) . "\n" .
                 "- responder_permitido: " . ($podeResponder ? 'true' : 'false') . "\n" .
                 "- profissional_nome: " . ($profNome !== '' ? $profNome : 'não informado') . "\n" .
                 "- profissional_tratamento: " . ($profTrat !== '' ? $profTrat : 'Dra./Dr.') . "\n" .
-                "Quando precisar referenciar, use: \"" . ($profTrat ?: 'Dra./Dr.') . " " . ($profNome !== '' ? $profNome : 'da clínica') . "\"."
-            )
+                "- dono_da_instancia: " . ($donoUsuarioNome !== '' ? $donoUsuarioNome : 'não informado') . "\n" .
+                "Quando precisar referenciar a profissional, use: \"" . ($profTrat ?: 'Dra./Dr.') . " " . ($profNome !== '' ? $profNome : 'da clínica') . "\"."
         ];
         $injections[] = $contextoOp;
 
+        // Tom “menininha” melhorado
         if ($tomProximo) {
-            $injections[] = [ 'role' => 'system', 'content' => 'Tom: pt-BR natural, acolhedor e direto (sem formalidade). Fale como alguém da clínica.' ];
+            $injections[] = [ 'role' => 'system', 'content' => 'Tom: pt-BR natural, acolhedor e direto, soando como atendente da clínica; sem formalidade.' ];
         }
         if ($estiloMocinha) {
-            $injections[] = [ 'role' => 'system', 'content' => 'Estilo leve/feminino (“menininha”): frases curtas; 0–1 emoji quando fizer sentido; sem floreio.' ];
+            $injections[] = [ 'role' => 'system', 'content' => 'Estilo “menininha”: frases curtinhas, zero jargão, 0–1 emoji no máximo, acolha e convide sutilmente (sem vendedor).' ];
         }
         if ($conciso) {
             $injections[] = [ 'role' => 'system', 'content' => 'Breviedade: no máximo ' . $maxFrases . ' frases curtas ou ~' . $maxChars . ' caracteres. Evite listas longas.' ];
@@ -158,26 +161,26 @@ class OpenrouterModel extends Model
             $injections[] = [ 'role' => 'system', 'content' => 'No máximo UMA pergunta por resposta. Se a pessoa já perguntou algo, responda primeiro.' ];
         }
         if ($continuityGuard) {
-            $injections[] = [ 'role' => 'system', 'content' => 'Continuidade: não cumprimente de novo sem necessidade, não se reapresente e não repita o que já foi dito.' ];
+            $injections[] = [ 'role' => 'system', 'content' => 'Continuidade: não se reapresente, não cumprimente novamente sem necessidade e não repita o que já foi dito.' ];
         }
 
-        // Regras comerciais sem “enviar catálogo”
-        $injections[] = [ 'role' => 'system', 'content' => 'Objetivo: conduzir para o próximo passo com convite leve (ex.: “te passo os valores agora?” “quer agendar avaliação?”) sem parecer vendedor. Nunca prometa enviar catálogo, PDF, link ou arquivos; responda aqui mesmo.' ];
+        // Regras comerciais
+        $injections[] = [ 'role' => 'system', 'content' => 'Objetivo comercial: conduza para o próximo passo com convite leve (ex.: “te passo os valores agora?” “quer agendar avaliação?”). Não prometa enviar catálogo/arquivo/link; responda aqui.' ];
 
-        // Quando forem procedimentos/serviços, responder já com base na base
+        // Procedimentos/serviços — usar SOMENTE a base
         $injections[] = [ 'role' => 'system', 'content' =>
-            "Se pedirem sobre procedimentos/serviços/tratamentos, responda usando SOMENTE a Base da clínica. Liste 2–4 exemplos com micro-benefício (3–6 palavras cada) e depois um convite leve (ex.: “quer que eu te passe os valores agora?”). Nunca diga “vou te enviar o catálogo”."
+            "Quando perguntarem sobre procedimentos/serviços/tratamentos, responda usando SOMENTE a Base da clínica. Liste 2–4 pontos com micro-benefícios (3–6 palavras) e finalize com convite leve. Nunca diga “vou te enviar o catálogo”."
         ];
 
-        // Injeta Base (se houver)
+        // Injeta Base
         if ($kbTexto !== '') {
             $injections[] = [ 'role' => 'system', 'content' => $kbTexto ];
         } else {
             // Sem base: proíbe alucinação
             $injections[] = [ 'role' => 'system', 'content' =>
-                "Se a informação solicitada não estiver na base, seja honesta: diga que não está cadastrada aqui e ofereça confirmar com " .
+                "Se a informação solicitada não estiver na base, diga isso com sinceridade e ofereça confirmar com " .
                 ($profTrat ?: 'Dra./Dr.') . ' ' . ($profNome !== '' ? $profNome : 'da clínica') .
-                " para responder em seguida, sem prometer prazos. Não invente nem chute."
+                " antes de responder. Não invente."
             ];
         }
 
@@ -188,18 +191,16 @@ class OpenrouterModel extends Model
                 "Responda APENAS em JSON válido com as chaves:\n" .
                 "{\n  \"reply\": string,\n  \"etapa_sugerida\": string|null,\n  \"mover_agora\": boolean,\n  \"confianca\": number\n}\n\n" .
                 "Regras:\n" .
-                "- reply: texto curto, gentil, com CTA sutil, no tom definido.\n" .
-                "- etapa_sugerida: escolha EXATAMENTE UMA dentre etapas_validas. Se nenhuma fizer sentido, use null.\n" .
-                "- mover_agora: true somente com alta certeza e intenção clara; caso contrário false.\n" .
+                "- reply: texto curto, gentil, com CTA sutil no tom definido.\n" .
+                "- etapa_sugerida: escolha EXATAMENTE UMA dentre etapas_validas; se nenhuma, use null.\n" .
+                "- mover_agora: true só se houver alta certeza e intenção clara; caso contrário false.\n" .
                 "- confianca: 0..1.\n" .
-                "- Se responder_permitido=false, mantenha reply=\"\" (string vazia). Ainda assim avalie etapa_sugerida e confianca.\n" .
-                "- Nunca prometa enviar catálogo/arquivo/link. Responda aqui mesmo usando a Base.\n" .
+                "- Se responder_permitido=false, mantenha reply=\"\".\n" .
                 "- Se a mensagem do lead for vazia/ruído, retorne reply=\"\" e mover_agora=false."
         ];
 
         // Inserções
         array_splice($mensagens, 1, 0, $injections);
-        // Removemos os few-shots antigos que induziam a “enviar catálogo”
 
         // ---------- Janela de histórico ----------
         if (count($mensagens) > $this->maxJanelaHistorico) {
@@ -220,7 +221,6 @@ class OpenrouterModel extends Model
             'Accept: application/json'
         ];
 
-        // Acrescenta instrução de schema no final (prioridade baixa, apenas formato)
         $payloadMessages = $mensagens;
         $payloadMessages[] = $schemaInstr;
 
@@ -300,13 +300,6 @@ class OpenrouterModel extends Model
 
     /* ===================== Utilidades de estilo ===================== */
 
-    /**
-     * Pós-processa a resposta:
-     * - remove formalidade robótica
-     * - limita frases e tamanho
-     * - mantém no máximo 1 pergunta
-     * - 0–1 emoji quando fizer sentido
-     */
     private function lapidarResposta(string $txt, array $opts): string
     {
         $maxFrases     = (int) ($opts['max_frases'] ?? 3);
@@ -380,8 +373,8 @@ class OpenrouterModel extends Model
         int $assinanteId,
         $tags = null,
         ?string $etapa = null,
-        int $limitQtde = 8,
-        int $limitChars = 800
+        int $limitQtde = 30,
+        int $limitChars = 1200
     ): array {
         $db = \Config\Database::connect();
         $builder = $db->table('aprendizagens')
@@ -430,5 +423,62 @@ class OpenrouterModel extends Model
             $out[] = $linhaTitulo . $conteudo . $linhaTags;
         }
         return $out;
+    }
+
+    /**
+     * Extrai “Dra./Dr.” + nome e lista de procedimentos a partir do texto da base.
+     * Suporta frases do tipo:
+     * - "Nome da dra é vanessa"
+     * - "Dra Vanessa"
+     * - "nome: Vanessa"
+     * - "faz somente mini lipo", "faz mini lipo", "procedimentos: mini lipo, ..."
+     */
+    private function extrairIdentidadeDaBase(array $kbItens): array
+    {
+        $nome = '';
+        $trat = 'Dra.';
+        $proceds = [];
+
+        $texto = mb_strtolower(implode("\n", $kbItens), 'UTF-8');
+
+        // Tratamento (Dra./Dr.)
+        if (preg_match('/\bdr\.\b/u', $texto))  $trat = 'Dr.';
+        if (preg_match('/\bdra\.\b/u', $texto)) $trat = 'Dra.';
+
+        // Nome por padrões variados
+        if (preg_match('/nome da dr?a?\s*(?:é|:)\s*([a-zá-úãõâêôç ]{2,30})/u', $texto, $m)) {
+            $nome = trim($m[1]);
+        }
+        if ($nome === '' && preg_match('/\bdr?a?\.?\s+([a-zá-úãõâêôç ]{2,30})/u', $texto, $m)) {
+            $nome = trim($m[1]);
+        }
+        if ($nome === '' && preg_match('/\bnome\s*:\s*([a-zá-úãõâêôç ]{2,30})/u', $texto, $m)) {
+            $nome = trim($m[1]);
+        }
+
+        // Capitaliza
+        if ($nome !== '') {
+            $nome = preg_replace_callback('/\b([a-zá-úãõâêôç])([a-zá-úãõâêôç]*)/u', function($m) {
+                return mb_strtoupper($m[1], 'UTF-8') . $m[2];
+            }, $nome);
+        }
+
+        // Procedimentos
+        if (preg_match_all('/\b(faz(?:\s+somente)?|apenas|procedimentos?\s*:)\s*([a-z0-9 á-úãõâêôç\/\-\,]{2,})/u', $texto, $mm)) {
+            foreach ($mm[2] as $blob) {
+                $parts = preg_split('/[,\/]| e /u', $blob);
+                foreach ($parts as $p) {
+                    $pp = trim($p);
+                    if ($pp !== '') $proceds[] = $pp;
+                }
+            }
+        }
+        if (preg_match('/\bmini\s*lipo\b/u', $texto)) $proceds[] = 'mini lipo';
+
+        return [
+            'nome' => $nome,
+            'tratamento' => $trat,
+            'procedimentos' => array_values(array_unique(array_map('trim', $proceds))),
+        ];
     }
 }
